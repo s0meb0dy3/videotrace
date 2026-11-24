@@ -7,9 +7,9 @@ import { join } from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
-import { createServer } from '../agent/server.mjs';
-import { initializeTracing } from '../agent/tracing.mjs';
-import { runPiTask } from '../agent/runner.mjs';
+import { createServer } from '../dist/agent/server.js';
+import { initializeTracing } from '../dist/agent/tracing.js';
+import { runPiTask } from '../dist/agent/runner.js';
 
 test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文', async t => {
   const root = await mkdtemp(join(tmpdir(), 'agent-tracing-test-'));

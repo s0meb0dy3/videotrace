@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ASR_MODEL, loadBailianApiKey, transcribeAudioFile } from '../agent/asr-service.mjs';
+import { ASR_MODEL, loadBailianApiKey, transcribeAudioFile } from '../dist/agent/asr-service.js';
 
 const raw = { transcripts: [{ sentences: [
   { begin_time: 100, end_time: 200, text: '第二句', speaker_id: 1 },

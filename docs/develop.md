@@ -1,14 +1,15 @@
 ```
 bilibili/
 ├── agent/                         # 本地服务：负责转写、模型调用和任务管理
-│   ├── server.mjs                 # HTTP/SSE 接口、音频上传、进度、取消和结果保存
-│   ├── asr-service.mjs            # 调用百炼 ASR，取得带时间和说话人编号的转写
-│   ├── runner.mjs                 # 运行 Pi Agent，把完整转写和视频资料交给 DeepSeek
-│   ├── document.mjs               # 校验输入文稿，以及最终的说话人映射和摘要
-│   ├── web-search.mjs             # 可选的 DeepSeek 搜索，用于补充公开身份线索
-│   ├── face-broker.mjs            # 协调浏览器采帧和候选 ID
-│   ├── translate.mjs              # 批量翻译转写
-│   ├── tracing.mjs                # 可选的 Langfuse 追踪
+│   ├── server.ts                  # HTTP/SSE 接口、音频上传、进度、取消和结果保存
+│   ├── asr-service.ts             # 调用百炼 ASR，取得带时间和说话人编号的转写
+│   ├── runner.ts                  # 运行 Pi Agent，把完整转写和视频资料交给 DeepSeek
+│   ├── document.ts                # 校验输入文稿，以及最终的说话人映射和摘要
+│   ├── web-search.ts              # 可选的 DeepSeek 搜索，用于补充公开身份线索
+│   ├── face-broker.ts             # 协调浏览器采帧和候选 ID
+│   ├── translate.ts               # 批量翻译转写
+│   ├── tracing.ts                 # 可选的 Langfuse 追踪
+│   ├── core/                      # 状态机、任务存储、事件日志、队列和问答会话
 │   └── README.md                  # 本地服务配置与接口说明
 │
 ├── extension/                     # Chrome / Edge 扩展：负责取素材、操作播放器和展示

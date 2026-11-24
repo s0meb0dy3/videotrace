@@ -4,7 +4,7 @@
 
 运行环境：Node.js ≥22.19.0。后端源码使用 TypeScript，先执行 `npm ci` 安装依赖，再执行 `npm run build:agent` 编译。项目已锁定 `@earendil-works/pi-agent-core` / `@earendil-works/pi-ai` 1.5.2。
 
-在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再通过兼容入口启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
+在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
 
 通过本机环境变量 `DEEPSEEK_API_KEY`（优先）或 `API_KEY` 配置密钥；也可在项目根目录 `.env` 中写入同名配置。支持引号和 `export KEY=...`。不要把真实密钥发送到聊天或提交到 Git。服务不会打印配置值。仅支持固定 `https://api.deepseek.com`，模型为 `deepseek-flash`，不接受客户端提供的模型 URL。注册 Pi 内置 DeepSeek provider；目录没有 flash 时以同 provider 的已知 descriptor 覆盖 id，仍使用该 provider 的 stream adapter。
 
@@ -39,7 +39,7 @@
 
 后端当前按以下职责拆分：
 
-- `agent/server.ts`：HTTP/SSE 协议适配和 provider 编排；`server.mjs` 仅做兼容入口。
+- `agent/server.ts`：HTTP/SSE 协议适配和 provider 编排，编译后由 `dist/agent/server.js` 运行。
 - `agent/core/task-machine.ts`：唯一的合法状态转移表，终态任务不可回退。
 - `agent/core/task-manager.ts`：任务状态、取消、超时和重启恢复。
 - `agent/core/task-store.ts`：任务 JSON、模型消息的原子写入与损坏文件隔离。
@@ -55,4 +55,4 @@ YouTube 接入时，扩展负责在页面环境获取字幕或音频，后端只
 
 运行 `node --test tests/agent-*.test.mjs`。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试搜索→观察→再工具、校验错误修复、finalize 截止、预算；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
 
-`agent/server.mjs` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。
+`dist/agent/server.js` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。

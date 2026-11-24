@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText } from '@earendil-works/pi-ai';
-import { runPiTask, createDeepSeekRuntime, loadApiKey } from '../agent/runner.mjs';
-import { prepareDocument, validateResult } from '../agent/document.mjs';
+import { runPiTask, createDeepSeekRuntime, loadApiKey } from '../dist/agent/runner.js';
+import { prepareDocument, validateResult } from '../dist/agent/document.js';
 
 export const document = { context: { bvid: 'BVtest', title: '测试视频', description: '节目简介', uploader: { name: '测试UP主', bio: '主持栏目' } }, cues: [{ id: 'c1', speakerId: '0', startMs: 0, endMs: 1000, text: '你好，我是主持人。' }, { id: 'c2', speakerId: '1', startMs: 1000, endMs: 2000, text: '大家好。' }], paragraphs: [], raw: { original: true } };
 const result = { speakers: { '0': '主持人', '1': '未知发言人' }, summary: '相互问候' };

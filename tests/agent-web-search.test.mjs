@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createWebSearch } from '../agent/web-search.mjs';
+import { createWebSearch } from '../dist/agent/web-search.js';
 
 test('联网搜索调用DeepSeek Search API，只返回标题URL摘要', async () => {
   const signal = new AbortController().signal;

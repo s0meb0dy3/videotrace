@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import { once } from 'node:events';
-import { createServer } from '../agent/server.mjs';
+import { createServer } from '../dist/agent/server.js';
 const document = { context: { bvid: 'BVtest' }, cues: [{ id: 'c1', speakerId: '0', text: '原始句子', startMs: 0, endMs: 100 }], paragraphs: [], raw: { keep: true } };
 const result = { speakers: { '0': '未知发言人' }, summary: '摘要' };
 async function setup(t, options = {}) {

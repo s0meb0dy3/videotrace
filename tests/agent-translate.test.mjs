@@ -4,8 +4,8 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { translationBatches, translateBatches } from '../agent/translate.mjs';
-import { createServer } from '../agent/server.mjs';
+import { translationBatches, translateBatches } from '../dist/agent/translate.js';
+import { createServer } from '../dist/agent/server.js';
 
 const choice = (translations, finish_reason = 'stop') => Response.json({
   choices: [{ finish_reason, message: { content: JSON.stringify({ translations }) } }]

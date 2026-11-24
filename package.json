@@ -11,7 +11,7 @@
     "check": "node scripts/check.mjs",
     "typecheck": "tsc -p tsconfig.agent.json --noEmit",
     "build:agent": "tsc -p tsconfig.agent.json",
-    "agent:dev": "npm run build:agent && node agent/server.mjs",
+    "agent:dev": "npm run build:agent && node dist/agent/server.js",
     "test:browser": "node scripts/browser-check.mjs",
     "package": "npm run typecheck && npm run build:agent && npm run check && python3 scripts/package.py"
   },
