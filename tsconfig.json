@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.agent.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["agent/**/*.ts"]
+}

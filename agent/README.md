@@ -2,9 +2,9 @@
 
 ## 启动和配置
 
-运行环境：Node.js ≥22.19.0。项目已锁定 `@earendil-works/pi-agent-core` / `@earendil-works/pi-ai` 1.5.2，先执行 `npm ci` 安装依赖。
+运行环境：Node.js ≥22.19.0。后端源码使用 TypeScript，先执行 `npm ci` 安装依赖，再执行 `npm run build:agent` 编译。项目已锁定 `@earendil-works/pi-agent-core` / `@earendil-works/pi-ai` 1.5.2。
 
-在项目根目录运行 `npm run agent:dev`（等价于 `node agent/server.mjs`）。只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
+在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再通过兼容入口启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
 
 通过本机环境变量 `DEEPSEEK_API_KEY`（优先）或 `API_KEY` 配置密钥；也可在项目根目录 `.env` 中写入同名配置。支持引号和 `export KEY=...`。不要把真实密钥发送到聊天或提交到 Git。服务不会打印配置值。仅支持固定 `https://api.deepseek.com`，模型为 `deepseek-flash`，不接受客户端提供的模型 URL。注册 Pi 内置 DeepSeek provider；目录没有 flash 时以同 provider 的已知 descriptor 覆盖 id，仍使用该 provider 的 stream adapter。
 
@@ -31,9 +31,25 @@
 
 开启头像后，创建任务时传 `inspectFaces: true`，允许 Agent 自选时间范围调用 `inspect_faces`。扩展收到 `capture_faces` SSE 事件后在当前视频采帧，并通过 `POST /tasks/:id/faces` 回传 `{requestId,frames}`。单次最多 20 秒，每秒在浏览器本地检测一次，只从检测到脸的帧里均匀取最多 3 张完整截图，仅附在下一次 DeepSeek 请求里。截图不进入 Pi 消息、任务日志或 Langfuse。最终结果可带 `faces`（speakerId 对应已展示的候选 ID 或 null），扩展据此裁剪并缓存最终头像。
 
-硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。搜索、头像和提交共用 15 次工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。
+硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。默认单进程最多并发运行2个任务、最多保留500个任务，音频默认上限512MiB；单句字幕限制32,000字符、单个文稿最多10,000句，context 默认限制256KiB；等待音频上传超过10分钟会自动超时。搜索、头像和提交共用15次工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。终态任务默认保留7天，启动时自动清理过期任务；事件内存只保留最近500条，SSE历史回放从磁盘读取。
 
 任务持久化在 `.private/agent/tasks/`，包括任务 JSON、messages JSON 和带 id 的 events JSONL；任务文件为0600、目录0700。保存原始字幕用于本地回看，不重写字幕内容。凭证和 SDK errorMessage 等敏感字段不写入任务或模型事件日志。Langfuse 追踪保留每轮模型调用、搜索词与精简搜索结果、最终 speaker 映射和摘要；完整逐字稿和音频不发送到 Langfuse。上传临时 m4a 在流水线结束时删除；进程异常退出可能遗留的上传文件仅供本机手动清理，不会自动续接收费请求。
+
+## 后端架构与扩展边界
+
+后端当前按以下职责拆分：
+
+- `agent/server.ts`：HTTP/SSE 协议适配和 provider 编排；`server.mjs` 仅做兼容入口。
+- `agent/core/task-machine.ts`：唯一的合法状态转移表，终态任务不可回退。
+- `agent/core/task-manager.ts`：任务状态、取消、超时和重启恢复。
+- `agent/core/task-store.ts`：任务 JSON、模型消息的原子写入与损坏文件隔离。
+- `agent/core/event-log.ts`：事件序号、磁盘回放、SSE 订阅和内存窗口。
+- `agent/core/job-queue.ts`：有界并发队列；未来可替换为 SQLite 持久队列。
+- `agent/contracts.ts`：统一 `VideoContext`、`VideoSourceAdapter`、字幕检索和问答会话契约。
+- `agent/media-source.ts`：B站/YouTube 来源适配器骨架；当前只开放 B站扩展端。
+- `agent/core/session-store.ts`：独立问答会话存储骨架；问答不会复用一次性分析的 `result`。
+
+YouTube 接入时，扩展负责在页面环境获取字幕或音频，后端只接收统一文档或二进制上传，不在核心服务中实现任意 URL 下载。交互式问答应新增独立 `/qa` 会话、检索、引用和过期策略，避免把多轮对话塞进一次性分析任务。
 
 ## 测试和集成
 
