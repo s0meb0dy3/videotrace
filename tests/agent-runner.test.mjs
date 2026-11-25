@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText } from '@earendil-works/pi-ai';
-import { runPiTask, createDeepSeekRuntime, loadApiKey } from '../dist/agent/runner.js';
+import { runPiTask, createDeepSeekRuntime, createOpenAICompatibleRuntime, loadApiKey, loadModelConfig } from '../dist/agent/runner.js';
 import { prepareDocument, validateResult } from '../dist/agent/document.js';
 
 export const document = { context: { bvid: 'BVtest', title: '测试视频', description: '节目简介', uploader: { name: '测试UP主', bio: '主持栏目' } }, cues: [{ id: 'c1', speakerId: '0', startMs: 0, endMs: 1000, text: '你好，我是主持人。' }, { id: 'c2', speakerId: '1', startMs: 1000, endMs: 2000, text: '大家好。' }], paragraphs: [], raw: { original: true } };
@@ -80,11 +80,17 @@ test('校验拒绝缺失、多出或空白的说话人标签与空摘要', () =>
   assert.throws(() => validateResult({ ...result, summary: ' ' }, prepared), /summary/);
 });
 
-test('DeepSeek runtime pins provider URL/model and resolves env without exposing keys', async () => {
-  const runtime = createDeepSeekRuntime('test-secret');
-  assert.equal(runtime.model.id, 'deepseek-flash');
-  assert.equal(runtime.model.provider, 'deepseek');
-  assert.equal(runtime.model.baseUrl, 'https://api.deepseek.com');
+test('OpenAI-compatible runtime accepts configurable provider and model', async () => {
+  const runtime = createOpenAICompatibleRuntime({ provider: 'bailian', model: 'qwen3.8-flash', apiKey: 'test-secret', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' });
+  assert.equal(runtime.model.id, 'qwen3.8-flash');
+  assert.equal(runtime.model.provider, 'bailian');
+  assert.equal(runtime.model.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+  assert.equal(runtime.model.api, 'openai-completions');
+  const deepseek = createDeepSeekRuntime('deepseek-secret');
+  assert.equal(deepseek.model.id, 'deepseek-flash');
+  assert.equal(deepseek.model.baseUrl, 'https://api.deepseek.com');
   assert.equal(await loadApiKey('/unused', { API_KEY: 'generic' }), 'generic');
   assert.equal(await loadApiKey('/unused', { API_KEY: 'generic', DEEPSEEK_API_KEY: 'specific' }), 'specific');
+  const config = await loadModelConfig('/unused', { AI_PROVIDER: 'bailian', AI_MODEL: 'qwen3.8-flash', AI_API_KEY: 'bailian-key', AI_BASE_URL: 'https://example.test/v1' });
+  assert.deepEqual(config, { provider: 'bailian', model: 'qwen3.8-flash', apiKey: 'bailian-key', baseUrl: 'https://example.test/v1', maxTokens: 8192, contextWindow: 128000, input: ['text', 'image'], reasoning: true });
 });

@@ -6,7 +6,7 @@
 
 在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
 
-通过本机环境变量 `DEEPSEEK_API_KEY`（优先）或 `API_KEY` 配置密钥；也可在项目根目录 `.env` 中写入同名配置。支持引号和 `export KEY=...`。不要把真实密钥发送到聊天或提交到 Git。服务不会打印配置值。仅支持固定 `https://api.deepseek.com`，模型为 `deepseek-flash`，不接受客户端提供的模型 URL。注册 Pi 内置 DeepSeek provider；目录没有 flash 时以同 provider 的已知 descriptor 覆盖 id，仍使用该 provider 的 stream adapter。
+主分析模型通过 OpenAI-compatible Chat Completions 配置。默认读取 `DEEPSEEK_API_KEY`（兼容 `API_KEY`），也可使用通用配置：`AI_PROVIDER`、`AI_MODEL`、`AI_API_KEY`、`AI_BASE_URL`、`AI_MAX_TOKENS`、`AI_CONTEXT_WINDOW` 和 `AI_REASONING`。例如百炼可配置 `AI_PROVIDER=bailian`、`AI_MODEL=qwen3.8-flash`、`AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`AI_API_KEY=...`。DeepSeek 默认仍为 `deepseek-flash` 和 `https://api.deepseek.com`。PIAI 负责 OpenAI-compatible 请求、流式响应和工具调用；模型地址与 ID 由本地配置提供，不从浏览器请求接收。支持引号和 `export KEY=...`，不要把真实密钥发送到聊天或提交到 Git。
 
 音频转写使用本机环境变量 `BAILIAN_API_KEY`（优先）或 `BAILIAN_KEY`，也支持根目录 `.env` 的同名配置。密钥仅由后台读取，不从请求接收，不进入任务和日志。固定北京地域百炼 API，模型固定为 `qwen-audio-3.1-asr-flash-filetrans`。网页负责在 B站页面环境下载音频（保留页面的 CDN 访问条件），然后上传给本服务；服务不直接拉取客户端提供的音频 URL，也不接收 JSON/base64 音频。
 
@@ -55,4 +55,4 @@ YouTube 接入时，扩展负责在页面环境获取字幕或音频，后端只
 
 运行 `npm test`（会先编译 Agent，再执行全部测试）。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试搜索→观察→再工具、校验错误修复、finalize 截止、预算；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
 
-`dist/agent/server.js` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。
+`dist/agent/server.js` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、modelConfig、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。

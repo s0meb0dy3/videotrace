@@ -9,7 +9,7 @@
 ```bash
 npm ci
 cp .env.example .env
-# 在 .env 中填写 BAILIAN_API_KEY 和 DEEPSEEK_API_KEY
+# 在 .env 中填写 BAILIAN_API_KEY 和 AI_API_KEY（或 DEEPSEEK_API_KEY）
 npm run agent:dev
 ```
 

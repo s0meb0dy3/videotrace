@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { Tracing } from './tracing.js';
+import type { ModelConfig } from './runner.js';
 
 export interface AgentConnection {
   url: string;
@@ -17,6 +18,7 @@ export interface CreateServerOptions {
   runner?: (...args: any[]) => any;
   asrRunner?: (...args: any[]) => any;
   apiKey?: string;
+  modelConfig?: ModelConfig;
   bailianApiKey?: string;
   searchApiKey?: string;
   tracing?: Tracing;
