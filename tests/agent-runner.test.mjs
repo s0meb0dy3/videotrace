@@ -15,23 +15,16 @@ function runtime(responses) {
 }
 const call = (name, args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: 'toolUse' });
 
-test('首轮传入完整转写及资料，按需搜索后修正提交', async () => {
+test('首轮传入完整转写及资料，校验失败后修正提交', async () => {
   const invalid = { ...result, speakers: { '0': '主持人' } };
-  const script = runtime([call('web_search', { query: '测试节目 嘉宾' }), call('finalize_video_result', invalid), call('finalize_video_result', result), fauxAssistantMessage([fauxText('不应继续')])]);
-  const queries = [];
-  const output = await runPiTask({ document, runtime: script.runtime, webSearch: async query => {
-    queries.push(query); return [{ title: '节目嘉宾', url: 'https://example.com' }];
-  } });
-  assert.deepEqual(output, result);
-  assert.deepEqual(queries, ['测试节目 嘉宾']);
+  const script = runtime([call('finalize_video_result', invalid), call('finalize_video_result', result), fauxAssistantMessage([fauxText('不应继续')])]);
+  assert.deepEqual(await runPiTask({ document, runtime: script.runtime }), result);
   assert.equal(script.faux.getPendingResponseCount(), 1);
-  assert.deepEqual(script.contexts[0].messages.flatMap(message => message.toolsAdded || []).map(tool => tool.name), ['web_search', 'finalize_video_result']);
   const first = script.contexts[0].messages.find(message => message.role === 'user');
   const input = JSON.parse(first.content[0].text);
   assert.deepEqual(input.context, document.context);
   assert.deepEqual(input.cues, document.cues);
-  assert.ok(script.contexts[1].messages.some(message => message.role === 'toolResult' && message.toolName === 'web_search'));
-  assert.ok(script.contexts[2].messages.some(message => message.role === 'toolResult' && message.toolName === 'finalize_video_result' && message.isError));
+  assert.ok(script.contexts[1].messages.some(message => message.role === 'toolResult' && message.toolName === 'finalize_video_result' && message.isError));
 });
 
 test('inspect_faces returns metadata and attaches each image once to next request', async () => {
@@ -48,17 +41,19 @@ test('inspect_faces returns metadata and attaches each image once to next reques
   assert.equal(JSON.stringify(messages).includes('abc'), false);
 });
 
-test('没有搜索配置时只暴露提交工具，首轮可以直接完成', async () => {
+test('没有头像工具时只暴露提交工具，首轮可以直接完成', async () => {
   const script = runtime([call('finalize_video_result', result)]);
   assert.deepEqual(await runPiTask({ document, runtime: script.runtime }), result);
   assert.deepEqual(script.contexts[0].messages.flatMap(message => message.toolsAdded || []).map(tool => tool.name), ['finalize_video_result']);
 });
 
-test('Pi 同批提交成功后不再执行搜索', async () => {
-  const script = runtime([fauxAssistantMessage([fauxToolCall('finalize_video_result', result), fauxToolCall('web_search', { query: '节目' })], { stopReason: 'toolUse' })]);
-  let searches = 0;
-  await runPiTask({ document, runtime: script.runtime, webSearch: async () => ++searches });
-  assert.equal(searches, 0);
+const range = { startMs: 0, endMs: 1000 };
+
+test('Pi 同批提交成功后不再执行采帧', async () => {
+  const script = runtime([fauxAssistantMessage([fauxToolCall('finalize_video_result', result), fauxToolCall('inspect_faces', range)], { stopReason: 'toolUse' })]);
+  let scans = 0;
+  assert.deepEqual(await runPiTask({ document, runtime: script.runtime, inspectFaces: async () => { scans++; } }), result);
+  assert.equal(scans, 0);
   assert.equal(script.faux.state.callCount, 1);
 });
 
@@ -66,10 +61,10 @@ test('轮次与工具预算仍然生效', async () => {
   const turns = runtime([fauxAssistantMessage([fauxText('不提交')]), fauxAssistantMessage([fauxText('不提交')])]);
   await assert.rejects(runPiTask({ document, runtime: turns.runtime, maxTurns: 2 }));
   assert.equal(turns.faux.state.callCount, 2);
-  const tools = runtime([call('web_search', { query: '节目' }), call('finalize_video_result', result)]);
-  let searches = 0;
-  assert.deepEqual(await runPiTask({ document, runtime: tools.runtime, webSearch: async () => { searches++; return []; }, maxToolCalls: 1 }), result);
-  assert.equal(searches, 0);
+  const tools = runtime([call('inspect_faces', range), call('finalize_video_result', result)]);
+  let scans = 0;
+  assert.deepEqual(await runPiTask({ document, runtime: tools.runtime, inspectFaces: async () => { scans++; }, maxToolCalls: 1 }), result);
+  assert.equal(scans, 0);
 });
 
 test('校验拒绝缺失、多出或空白的说话人标签与空摘要', () => {
@@ -92,6 +87,27 @@ test('OpenAI-compatible runtime accepts configurable provider and model', async 
   assert.equal(await loadApiKey('/unused', { API_KEY: 'generic' }), 'generic');
   assert.equal(await loadApiKey('/unused', { API_KEY: 'generic', DEEPSEEK_API_KEY: 'specific' }), 'specific');
   const config = await loadModelConfig('/unused', { AI_PROVIDER: 'bailian', AI_MODEL: 'qwen3.8-flash', AI_API_KEY: 'bailian-key', AI_BASE_URL: 'https://example.test/v1' });
-  assert.deepEqual(config, { provider: 'bailian', model: 'qwen3.8-flash', apiKey: 'bailian-key', baseUrl: 'https://example.test/v1', maxTokens: 8192, contextWindow: 128000, input: ['text', 'image'], reasoning: true });
+  assert.deepEqual(config, { provider: 'bailian', model: 'qwen3.8-flash', apiKey: 'bailian-key', baseUrl: 'https://example.test/v1', maxTokens: 8192, contextWindow: 128000, input: ['text', 'image'], reasoning: true, webSearch: false });
   assert.equal((await loadModelConfig('/unused', { AI_PROVIDER: 'bailian', BAILIAN_API_KEY: 'asr-key' })).apiKey, 'asr-key');
+});
+
+
+test('仅百炼显式开启时发送顶层 enable_search', async () => {
+  for (const [provider, flag, expected] of [['bailian', 'true', true], ['bailian', undefined, undefined], ['deepseek', 'true', undefined], ['custom', 'true', undefined]]) {
+    const config = await loadModelConfig('/unused', { AI_PROVIDER: provider, AI_WEB_SEARCH: flag, AI_API_KEY: 'test-key', AI_BASE_URL: 'https://example.test/v1' });
+    const runtime = createOpenAICompatibleRuntime(config);
+    const stream = runtime.streamFn(runtime.model, { messages: [{ role: 'user', content: [{ type: 'text', text: '测试' }], timestamp: 1 }] }, {
+      fetch: async (url, { body }) => {
+        assert.equal(String(url), 'https://example.test/v1/chat/completions');
+        const payload = JSON.parse(body);
+        assert.equal(payload.enable_search, expected);
+        assert.equal(payload.extra_body, undefined);
+        const chunk = { choices: [{ index: 0, delta: { content: '好' }, finish_reason: 'stop' }] };
+        return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+      },
+      maxRetries: 0,
+    });
+    const response = await stream.result();
+    assert.notEqual(response.stopReason, 'error', response.errorMessage);
+  }
 });

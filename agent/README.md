@@ -6,7 +6,7 @@
 
 在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
 
-主分析模型通过 OpenAI-compatible Chat Completions 配置。默认读取 `DEEPSEEK_API_KEY`（兼容 `API_KEY`）；当 `AI_PROVIDER=bailian` 且未设置 `AI_API_KEY` 时也会使用 `BAILIAN_API_KEY`。也可使用通用配置：`AI_PROVIDER`、`AI_MODEL`、`AI_API_KEY`、`AI_BASE_URL`、`AI_MAX_TOKENS`、`AI_CONTEXT_WINDOW` 和 `AI_REASONING`。例如百炼可配置 `AI_PROVIDER=bailian`、`AI_MODEL=qwen3.8-flash`、`AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`AI_API_KEY=...`。DeepSeek 默认仍为 `deepseek-flash` 和 `https://api.deepseek.com`。PIAI 负责 OpenAI-compatible 请求、流式响应和工具调用；模型地址与 ID 由本地配置提供，不从浏览器请求接收。百炼兼容接口不接受 `developer` role，运行时已设置 PIAI 的 `supportsDeveloperRole: false`；模型描述也包含必要的成本字段，避免工具调用后的本地追踪错误。支持引号和 `export KEY=...`，不要把真实密钥发送到聊天或提交到 Git。
+主分析模型通过 OpenAI-compatible Chat Completions 配置。默认读取 `DEEPSEEK_API_KEY`（兼容 `API_KEY`）；当 `AI_PROVIDER=bailian` 且未设置 `AI_API_KEY` 时也会使用 `BAILIAN_API_KEY`。也可使用通用配置：`AI_PROVIDER`、`AI_MODEL`、`AI_API_KEY`、`AI_BASE_URL`、`AI_MAX_TOKENS`、`AI_CONTEXT_WINDOW` 和 `AI_REASONING`。例如百炼可配置 `AI_PROVIDER=bailian`、`AI_MODEL=qwen3.8-flash`、`AI_BASE_URL` 使用百炼控制台提供的工作空间兼容地址（写到 `/compatible-mode/v1`）、`AI_API_KEY=...`。DeepSeek 默认仍为 `deepseek-flash` 和 `https://api.deepseek.com`。PIAI 负责 OpenAI-compatible 请求、流式响应和工具调用；模型地址与 ID 由本地配置提供，不从浏览器请求接收。百炼兼容接口不接受 `developer` role，运行时已设置 PIAI 的 `supportsDeveloperRole: false`；模型描述也包含必要的成本字段，避免工具调用后的本地追踪错误。支持引号和 `export KEY=...`，不要把真实密钥发送到聊天或提交到 Git。
 
 音频转写使用本机环境变量 `BAILIAN_API_KEY`（优先）或 `BAILIAN_KEY`，也支持根目录 `.env` 的同名配置。密钥仅由后台读取，不从请求接收，不进入任务和日志。固定北京地域百炼 API，模型固定为 `qwen-audio-3.1-asr-flash-filetrans`。网页负责在 B站页面环境下载音频（保留页面的 CDN 访问条件），然后上传给本服务；服务不直接拉取客户端提供的音频 URL，也不接收 JSON/base64 音频。
 
@@ -27,13 +27,13 @@
 
 ## Pi 执行与存储
 
-首轮将视频标题、简介、UP 主公开信息与完整逐句转写交给 DeepSeek，不再提供转写查询工具。本地服务默认用 `DEEPSEEK_API_KEY` 调用 DeepSeek Search API，也可用 `DEEPSEEK_SEARCH_API_KEY` 单独配置；启用 `web_search` 后模型自主决定查询次数，每次最多返回五条结果。仅在资料不足时请模型用公开视频标题、节目名或候选姓名查询；查询会发给 DeepSeek Search API，不应包含转写原句或私人资料。未配置时仍可分析。最终调用 `finalize_video_result`：校验失败可修正，成功后立即结束。不提供问答工具。
+首轮将视频标题、简介、UP 主公开信息与完整逐句转写交给已配置的模型。需要联网时，在 `.env` 设置 `AI_PROVIDER=bailian` 和 `AI_WEB_SEARCH=true`，重启 Agent 后生效；适用于 `qwen3.8-flash` 等支持[百炼原生联网搜索](https://docs.bailian.console.aliyun.com/zh/model-studio/web-search)的模型。默认关闭，其他提供商不发送此参数。由百炼在模型请求内按需搜索，不再注册本地搜索工具，Langfuse 不会显示独立搜索调用。开启后可能增加请求时延和费用。模型仍须调用 `finalize_video_result` 提交结果：校验失败可修正，成功后立即结束。暂不提供交互式问答。
 
-开启头像后，创建任务时传 `inspectFaces: true`，允许 Agent 自选时间范围调用 `inspect_faces`。扩展收到 `capture_faces` SSE 事件后在当前视频采帧，并通过 `POST /tasks/:id/faces` 回传 `{requestId,frames}`。单次最多 20 秒，每秒在浏览器本地检测一次，只从检测到脸的帧里均匀取最多 3 张完整截图，仅附在下一次 DeepSeek 请求里。截图不进入 Pi 消息、任务日志或 Langfuse。最终结果可带 `faces`（speakerId 对应已展示的候选 ID 或 null），扩展据此裁剪并缓存最终头像。
+开启头像后，创建任务时传 `inspectFaces: true`，允许 Agent 自选时间范围调用 `inspect_faces`。扩展收到 `capture_faces` SSE 事件后在当前视频采帧，并通过 `POST /tasks/:id/faces` 回传 `{requestId,frames}`。单次最多 20 秒，每秒在浏览器本地检测一次，只从检测到脸的帧里均匀取最多 3 张完整截图，仅附在下一次模型请求里。截图不进入 Pi 消息、任务日志或 Langfuse。最终结果可带 `faces`（speakerId 对应已展示的候选 ID 或 null），扩展据此裁剪并缓存最终头像。
 
-硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。默认单进程最多并发运行2个任务、最多保留500个任务，音频默认上限512MiB；音频上传采用5分钟无数据空闲超时，不限制整个上传过程的总时长；普通 HTTP 请求默认总超时5分钟，SSE 不设总超时；单句字幕限制32,000字符、单个文稿最多10,000句，context 默认限制256KiB；等待首次音频上传超过10分钟会自动超时。搜索、头像和提交共用15次工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。终态任务默认保留7天，启动时自动清理过期任务；事件内存只保留最近500条，SSE历史回放从磁盘读取。
+硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。默认单进程最多并发运行2个任务、最多保留500个任务，音频默认上限512MiB；音频上传采用5分钟无数据空闲超时，不限制整个上传过程的总时长；普通 HTTP 请求默认总超时5分钟，SSE 不设总超时；单句字幕限制32,000字符、单个文稿最多10,000句，context 默认限制256KiB；等待首次音频上传超过10分钟会自动超时。头像和提交共用15次本地工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。终态任务默认保留7天，启动时自动清理过期任务；事件内存只保留最近500条，SSE历史回放从磁盘读取。
 
-任务持久化在 `.private/agent/tasks/`，包括任务 JSON、messages JSON 和带 id 的 events JSONL；任务文件为0600、目录0700。保存原始字幕用于本地回看，不重写字幕内容。凭证和 SDK errorMessage 等敏感字段不写入任务或模型事件日志。Langfuse 追踪保留每轮模型调用、搜索词与精简搜索结果、最终 speaker 映射和摘要；完整逐字稿和音频不发送到 Langfuse。上传临时 m4a 在流水线结束时删除；进程异常退出可能遗留的上传文件仅供本机手动清理，不会自动续接收费请求。
+任务持久化在 `.private/agent/tasks/`，包括任务 JSON、messages JSON 和带 id 的 events JSONL；任务文件为0600、目录0700。保存原始字幕用于本地回看，不重写字幕内容。凭证和 SDK errorMessage 等敏感字段不写入任务或模型事件日志。Langfuse 追踪保留每轮模型调用、最终 speaker 映射和摘要；完整逐字稿和音频不发送到 Langfuse。上传临时 m4a 在流水线结束时删除；进程异常退出可能遗留的上传文件仅供本机手动清理，不会自动续接收费请求。
 
 ## 后端架构与扩展边界
 
@@ -53,6 +53,6 @@ YouTube 接入时，扩展负责在页面环境获取字幕或音频，后端只
 
 ## 测试和集成
 
-运行 `npm test`（会先编译 Agent，再执行全部测试）。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试搜索→观察→再工具、校验错误修复、finalize 截止、预算；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
+运行 `npm test`（会先编译 Agent，再执行全部测试）。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试采帧、校验错误修复、提交截止和工具预算；模拟模型请求验证搜索参数透传；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
 
 `dist/agent/server.js` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、modelConfig、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。

@@ -32,11 +32,12 @@ test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文'
   const model = faux.getModel();
   const models = createModels(); models.setProvider(faux.provider);
   const result = { speakers: { '0': '主持人' }, summary: 'PRIVATE_SUMMARY' };
-  const call = (name, args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: 'toolUse' });
-  faux.setResponses([call('web_search', { query: 'PRIVATE_QUERY' }), call('finalize_video_result', result)]);
+  // 首次提交缺少说话人标签，下一轮修正，用来验证真实工具的分层追踪。
+  faux.setResponses([{ ...fauxAssistantMessage([fauxToolCall('finalize_video_result', { ...result, speakers: {} })]), stopReason: 'toolUse' },
+    { ...fauxAssistantMessage([fauxToolCall('finalize_video_result', result)]), stopReason: 'toolUse' }]);
   const document = { context: { title: 'PRIVATE_TITLE' }, cues: [{ id: '1', speakerId: '0', startMs: 0, endMs: 100, text: 'PRIVATE_TRANSCRIPT' }] };
   const app = await createServer({ root, tracing, apiKey: 'sk-provider-test', asrRunner: async () => document, runner: options => runPiTask({
-    ...options, webSearch: async () => [{ title: 'PRIVATE_SEARCH_RESULT' }],
+    ...options,
     runtime: { model, streamFn: (...args) => models.streamSimple(...args) }
   }) });
   app.listen(0, '127.0.0.1'); await once(app, 'listening');
@@ -57,7 +58,6 @@ test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文'
   assert.ok(requests.every(req => req.path === '/api/public/otel/v1/traces' && req.version === '4'));
   const serialized = JSON.stringify(requests);
   assert.doesNotMatch(serialized, /PRIVATE_TRANSCRIPT|sk-provider-test|sk-trace-test/);
-  assert.match(serialized, /PRIVATE_QUERY/);
   assert.match(serialized, /PRIVATE_SUMMARY/);
   const spans = requests.flatMap(req => req.payload.resourceSpans.flatMap(resource => resource.scopeSpans.flatMap(scope => scope.spans)));
   const rootSpan = spans.find(span => span.name === 'analyze-video');
@@ -69,7 +69,7 @@ test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文'
   assert.deepEqual(spans.filter(span => span.parentSpanId === agent.spanId).map(span => span.name),
     ['turn-1', 'turn-2']);
   assert.deepEqual(spans.filter(span => span.name === 'turn-1').flatMap(turn => spans.filter(span => span.parentSpanId === turn.spanId).map(span => span.name)),
-    ['generate-video-analysis', 'web_search']);
+    ['generate-video-analysis', 'finalize_video_result']);
   assert.deepEqual(spans.filter(span => span.name === 'turn-2').flatMap(turn => spans.filter(span => span.parentSpanId === turn.spanId).map(span => span.name)),
     ['generate-video-analysis', 'finalize_video_result']);
   const generation = spans.find(span => span.name === 'generate-video-analysis');

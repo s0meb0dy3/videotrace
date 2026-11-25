@@ -20,7 +20,6 @@ export interface CreateServerOptions {
   apiKey?: string;
   modelConfig?: ModelConfig;
   bailianApiKey?: string;
-  searchApiKey?: string;
   tracing?: Tracing;
   timeoutMs?: number;
   asrTimeoutMs?: number;

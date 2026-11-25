@@ -3,11 +3,9 @@
 // 这里保留少量 any 是为了兼容现有注入式 provider；领域层保持严格类型。
 import http from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseEnv } from 'node:util';
-import { createWebSearch } from './web-search.js';
 import { documentStats, initializeTracing, resultStats } from './tracing.js';
 import { open, unlink } from 'node:fs/promises';
 import { loadBailianApiKey, transcribeAudioFile } from './asr-service.js';
@@ -37,7 +35,7 @@ function clean(value: unknown, secrets: Array<string | undefined>): any {
   }));
 }
 
-export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, modelConfig, bailianApiKey, searchApiKey, tracing, timeoutMs = 120_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, maxTurns, maxToolCalls = 15, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000, audioIdleTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
+export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, modelConfig, bailianApiKey, tracing, timeoutMs = 120_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, maxTurns, maxToolCalls = 15, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000, audioIdleTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
   const directory = resolve(root, '.private/agent');
   const taskDirectory = join(directory, 'tasks');
   mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
@@ -50,14 +48,8 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   modelConfig.apiKey ??= apiKey;
   apiKey = modelConfig.apiKey;
   bailianApiKey ??= await loadBailianApiKey(root);
-  searchApiKey ??= process.env.DEEPSEEK_SEARCH_API_KEY || (modelConfig.provider === 'deepseek' ? apiKey : undefined);
-  if (!searchApiKey) {
-    try { searchApiKey = parseEnv(readFileSync(join(root, '.env'), 'utf8')).DEEPSEEK_SEARCH_API_KEY || apiKey; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-  }
-  const webSearch = createWebSearch(searchApiKey);
   const token = randomBytes(32).toString('hex');
-  const secrets = [apiKey, bailianApiKey, searchApiKey, token];
+  const secrets = [apiKey, bailianApiKey, token];
   const active = new Map();
   const queue = new InMemoryJobQueue(maxConcurrentTasks);
   const traces = new Map();
@@ -142,7 +134,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
       const analysis = trace?.child('analyze-transcript', { input: documentStats(task.document) }, 'agent');
       try {
         const result = await runner({
-          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, apiKey, modelConfig, webSearch, inspectFaces: broker?.inspect, trace: analysis, maxTurns, maxToolCalls,
+          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, apiKey, modelConfig, inspectFaces: broker?.inspect, trace: analysis, maxTurns, maxToolCalls,
           onEvent: event => { if (!terminal(task.status)) publish(task.id, 'pi', event); },
           onMessages: messages => { if (!terminal(task.status)) return store.saveMessagesAsync(task.id, clean(messages, secrets)); }
         });
