@@ -17,7 +17,6 @@ export interface TaskManagerOptions {
 
 export class TaskManager {
   readonly tasks = new Map<string, Task>();
-  private readonly active = new Map<string, AbortController>();
   private readonly lanes = new Map<string, Promise<void>>();
   private readonly store: TaskStore;
   private readonly events: EventLog;
@@ -48,42 +47,18 @@ export class TaskManager {
     return [...this.tasks.values()];
   }
 
-  add(task: Task): void {
-    this.tasks.set(task.id, task);
-    this.events.initialize(task.id);
-    this.store.save(task);
-  }
-
   async addAsync(task: Task): Promise<void> {
     this.tasks.set(task.id, task);
     this.events.initialize(task.id);
     await this.store.saveAsync(task);
   }
 
-  get(id: string): Task | undefined { return this.tasks.get(id); }
-  all(): Task[] { return [...this.tasks.values()]; }
-  save(task: Task): void { this.store.save(task); }
-  publish(id: string, type: string, data: unknown): AgentEvent {
-    const event = this.events.append(id, type, data);
-    void this.onEvent?.(id, event);
-    return event;
-  }
   publishAsync(id: string, type: string, data: unknown): Promise<AgentEvent> {
     return this.enqueue(id, async () => {
       const event = await this.events.appendAsync(id, type, data);
       await this.onEvent?.(id, event);
       return event;
     });
-  }
-
-  updateStatus(task: Task, status: TaskStatus): boolean {
-    if (isTerminalStatus(task.status) || !canTransition(task.status, status)) return false;
-    task.status = status;
-    task.updatedAt = Date.now();
-    this.store.save(task);
-    const event = this.events.append(task.id, 'status', { status });
-    void this.onEvent?.(task.id, event);
-    return true;
   }
 
   updateStatusAsync(task: Task, status: TaskStatus): Promise<boolean> {
@@ -96,27 +71,6 @@ export class TaskManager {
       await this.onEvent?.(task.id, event);
       return true;
     });
-  }
-
-  begin(task: Task): AbortController {
-    const controller = new AbortController();
-    this.active.set(task.id, controller);
-    return controller;
-  }
-
-  controller(id: string): AbortController | undefined { return this.active.get(id); }
-
-  finish(task: Task, status: Extract<TaskStatus, 'completed' | 'failed' | 'cancelled' | 'timed_out'>, result?: unknown, error?: string): boolean {
-    if (isTerminalStatus(task.status) || !canTransition(task.status, status)) return false;
-    task.status = status;
-    task.updatedAt = Date.now();
-    if (result !== undefined) task.result = result as Task['result']; else delete task.result;
-    if (error !== undefined) task.error = error; else delete task.error;
-    this.store.save(task);
-    const event = this.events.append(task.id, 'status', { status, ...(task.result ? { result: task.result } : {}), ...(error ? { error } : {}) });
-    void this.onEvent?.(task.id, event);
-    void this.onFinish?.(task, status, result, error);
-    return true;
   }
 
   finishAsync(task: Task, status: Extract<TaskStatus, 'completed' | 'failed' | 'cancelled' | 'timed_out'>, result?: unknown, error?: string): Promise<boolean> {
@@ -133,23 +87,6 @@ export class TaskManager {
       await this.onFinish?.(task, status, result, error);
       return true;
     });
-  }
-
-  removeActive(id: string): void { this.active.delete(id); }
-
-  cancel(task: Task): boolean {
-    const changed = this.finish(task, 'cancelled');
-    if (changed) this.active.get(task.id)?.abort();
-    return changed;
-  }
-
-  abortAll(): void {
-    for (const [id, controller] of this.active) {
-      const task = this.tasks.get(id);
-      if (task && !isTerminalStatus(task.status)) this.finish(task, 'cancelled');
-      controller.abort();
-    }
-    this.active.clear();
   }
 
   private enqueue<T>(id: string, operation: () => Promise<T>): Promise<T> {

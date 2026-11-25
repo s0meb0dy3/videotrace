@@ -1,6 +1,6 @@
 /** 任务文件持久化：只负责读写 JSON，不参与任务业务状态流转。 */
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { chmod, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmod, rename, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import type { Task } from './types.js';
@@ -41,19 +41,6 @@ export class TaskStore {
   saveAsync(task: Task): Promise<void> {
     const serialized = JSON.stringify(task);
     return this.enqueue(task.id, () => this.atomicWrite(this.pathFor(task.id), serialized));
-  }
-
-  /** messages 只保存最近一次快照；调试内容过大时截断，避免无限增长。 */
-  saveMessages(id: string, messages: unknown): void {
-    const serialized = JSON.stringify(messages);
-    const bounded = serialized.length > 2_000_000
-      ? JSON.stringify({ truncated: true, originalBytes: Buffer.byteLength(serialized) })
-      : serialized;
-    const target = this.pathFor(id, '.messages.json');
-    const temporary = `${target}.tmp`;
-    writeFileSync(temporary, bounded, { mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, target);
   }
 
   saveMessagesAsync(id: string, messages: unknown): Promise<void> {
@@ -114,14 +101,6 @@ export class TaskStore {
     return tasks;
   }
 
-  remove(id: string): void {
-    for (const suffix of ['.json', '.events.jsonl', '.messages.json']) {
-      try { unlinkSync(this.pathFor(id, suffix)); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-    }
-  }
-
   async removeAsync(id: string): Promise<void> {
     await this.enqueue(id, async () => {
       for (const suffix of ['.json', '.events.jsonl', '.messages.json']) {
@@ -144,16 +123,4 @@ export class TaskStore {
     }
   }
 
-  async readEventsAsync(id: string): Promise<unknown[]> {
-    await this.flush(id);
-    try {
-      const text = (await readFile(this.pathFor(id, '.events.jsonl'), 'utf8')).trim();
-      return text ? text.split('\n').filter(Boolean).flatMap(line => {
-        try { return [JSON.parse(line)]; } catch { return []; }
-      }) : [];
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    }
-  }
 }
