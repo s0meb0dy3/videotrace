@@ -25,7 +25,7 @@ npm run check
 npm run package
 ```
 
-Agent 后端使用 TypeScript + Node.js。源码位于 [`agent/`](agent/)，运行前由 `build:agent` 编译到 `dist/agent/`，Node.js 直接执行编译后的 `dist/agent/server.js`。
+Agent 后端使用 TypeScript + Node.js。源码位于 [`agent/`](agent/)，运行前由 `build:agent` 编译到 `dist/agent/`，Node.js 直接执行编译后的 `dist/agent/server.js`。HTTP 请求体、SSE 连接管理和任务持久化分别由 `agent/http-body.ts`、`agent/core/sse-hub.ts`、`agent/core/task-store.ts` 负责。
 
 后端已将任务状态机、文件存储、事件日志和并发队列拆为独立模块，并通过 `agent/contracts.ts` 为 B站、YouTube 和交互式问答预留统一接口。当前扩展端仍只实现 B站；YouTube 和问答接口尚未开放。
 

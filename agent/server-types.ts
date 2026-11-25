@@ -31,5 +31,6 @@ export interface CreateServerOptions {
   audioReceiveTimeoutMs?: number;
   maxConcurrentTasks?: number;
   requestTimeoutMs?: number;
+  audioIdleTimeoutMs?: number;
   taskRetentionMs?: number;
 }

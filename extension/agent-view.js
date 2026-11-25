@@ -1,7 +1,7 @@
 import { createAgentClient } from './agent-client.js';
 
 // 页面仅供素材，转写与模型调用交给本地服务。
-export function createAgentView({ getDocument, loadAudio, captureFaces, cropFace, onProgress, onResult }) {
+export function createAgentView({ getDocument, loadAudio, releaseAudio, captureFaces, cropFace, onProgress, onResult }) {
   let controller;
   async function analyze({ inspectFaces = false } = {}) {
     const original = getDocument();
@@ -9,6 +9,7 @@ export function createAgentView({ getDocument, loadAudio, captureFaces, cropFace
     const { signal } = active;
     const client = createAgentClient();
     let taskId;
+    let audio;
     const candidates = new Map();
     const seen = new Set();
     let capturing;
@@ -37,7 +38,7 @@ export function createAgentView({ getDocument, loadAudio, captureFaces, cropFace
       taskId = task.id;
       if (!original.cues?.length) {
         onProgress('正在获取音频…');
-        const audio = await loadAudio(original.context, signal);
+        audio = await loadAudio(original.context, signal);
         signal.throwIfAborted();
         onProgress('正在上传音频…');
         await client.uploadAudio(taskId, audio, signal);
@@ -66,6 +67,9 @@ export function createAgentView({ getDocument, loadAudio, captureFaces, cropFace
       if (!signal.aborted) throw error;
     } finally {
       capturing?.abort();
+      // 释放 Blob 引用，并通知页面主环境清掉原始 Uint8Array。
+      audio = null;
+      if (!original.cues?.length) releaseAudio?.(original.context);
       if (controller === active) controller = null;
     }
   }

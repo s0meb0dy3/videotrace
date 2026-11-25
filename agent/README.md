@@ -17,7 +17,7 @@
 所有业务请求必须带 `Authorization: Bearer <本机token>`。Host 必须精确匹配 loopback 主机及实际端口（127.0.0.1、localhost 或 [::1]），拒绝 DNS rebinding 域名。带 Origin 的请求仅接受标准 Chrome 扩展 origin（`chrome-extension://` 加32位 a-p 扩展ID）；普通网页 origin、null origin 均拒绝。扩展 CORS 预检不带 token，但仅放行预检，本身不能查询或修改任务。
 
 - `POST /tasks`：推荐 JSON `{context:{title?,desc?,bvid?,cid?,part?,...},prompt?,mode:'analyze'}`，返回 HTTP 202 `{id,status:'receiving_audio'}`，此时不运行 ASR 或 Agent。也兼容离线实验 `{document,prompt?,mode}`，返回 `{id,status:'queued'}` 并直接分析；document 必须有非空 cues，每句有唯一字符串 id、text，speakerId 缺失归入 unknown。JSON 大小上限16MiB，不允许 `audio` 字段。
-- `POST /tasks/:id/audio`：同样需要 Bearer，`Content-Type: audio/mp4`，body 是原始 m4a 二进制而不是 JSON 或 multipart。仅 receiving_audio 任务可接收，禁止重复/并发上传。大小上限2GiB，流式写完整临时文件后返回 HTTP 202 `{id,received:true,size}`，再启动 ASR。空 body 返回400，类型错误415，超限413，状态不允许409；失败上传可重试，取消后不能上传。服务先保存到 `.private/agent/uploads/<id>.m4a`（0600、目录0700），再执行百炼 policy→OSS→异步提交→轮询→结果下载，原始音频不传给 Pi。
+- `POST /tasks/:id/audio`：同样需要 Bearer，`Content-Type: audio/mp4`，body 是原始 m4a 二进制而不是 JSON 或 multipart。仅 receiving_audio 任务可接收，禁止重复/并发上传。大小上限512MiB，流式写完整临时文件后返回 HTTP 202 `{id,received:true,size}`，再启动 ASR。空 body 返回400，类型错误415，超限413，状态不允许409；失败上传可重试，取消后不能上传。服务先保存到 `.private/agent/uploads/<id>.m4a`（0600、目录0700），再执行百炼 policy→OSS→异步提交→轮询→结果下载，原始音频不传给 Pi。
 - `GET /tasks/:id`：任务 `{id,status,context?,document?,mode,prompt?,createdAt,updatedAt,result?,error?}`。status：receiving_audio、queued（离线 document）、transcribing、analyzing、completed、failed、cancelled、timed_out。ASR 完成后 task.document 包含 context、原始 raw、normalized cues、paragraphs；原文保留，凭证值及敏感字段会脱敏。只有 completed 时有 result。
 - `GET /tasks/:id/events`：用 **fetch + Authorization header** 读取 SSE，不能使用不支持 header 的普通 EventSource。帧包含 `id`、`event` 和 JSON `data`；data 是 `{id,type,data,createdAt}`。type=status 或 pi（内部 data.type 是 Pi 事件类型）。`Last-Event-ID` header 或 `?after=N` 重放 N 后的事件，事件序号单任务单调递增。终态输出后关闭流，运行中有心跳。
 - `POST /tasks/:id/cancel`：返回 `{id,status}`。重复取消终态任务无副作用；取消不会把已完成任务改写为失败。
@@ -31,7 +31,7 @@
 
 开启头像后，创建任务时传 `inspectFaces: true`，允许 Agent 自选时间范围调用 `inspect_faces`。扩展收到 `capture_faces` SSE 事件后在当前视频采帧，并通过 `POST /tasks/:id/faces` 回传 `{requestId,frames}`。单次最多 20 秒，每秒在浏览器本地检测一次，只从检测到脸的帧里均匀取最多 3 张完整截图，仅附在下一次 DeepSeek 请求里。截图不进入 Pi 消息、任务日志或 Langfuse。最终结果可带 `faces`（speakerId 对应已展示的候选 ID 或 null），扩展据此裁剪并缓存最终头像。
 
-硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。默认单进程最多并发运行2个任务、最多保留500个任务，音频默认上限512MiB；单句字幕限制32,000字符、单个文稿最多10,000句，context 默认限制256KiB；等待音频上传超过10分钟会自动超时。搜索、头像和提交共用15次工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。终态任务默认保留7天，启动时自动清理过期任务；事件内存只保留最近500条，SSE历史回放从磁盘读取。
+硬限制：ASR 最长30分钟，随后 Pi 分析独立计时120秒。默认单进程最多并发运行2个任务、最多保留500个任务，音频默认上限512MiB；音频上传采用5分钟无数据空闲超时，不限制整个上传过程的总时长；普通 HTTP 请求默认总超时5分钟，SSE 不设总超时；单句字幕限制32,000字符、单个文稿最多10,000句，context 默认限制256KiB；等待首次音频上传超过10分钟会自动超时。搜索、头像和提交共用15次工具预算，最后一次保留给提交；不设模型轮数或独立头像次数上限。取消和超时立即冻结任务状态，不接受晚到结果或后续事件。失败无 result，HTTP/SSE/磁盘错误信息不保存完整 provider error。服务退出后未完成任务在下次启动标记失败，不自动重放收费请求。终态任务默认保留7天，启动时自动清理过期任务；事件内存只保留最近500条，SSE历史回放从磁盘读取。
 
 任务持久化在 `.private/agent/tasks/`，包括任务 JSON、messages JSON 和带 id 的 events JSONL；任务文件为0600、目录0700。保存原始字幕用于本地回看，不重写字幕内容。凭证和 SDK errorMessage 等敏感字段不写入任务或模型事件日志。Langfuse 追踪保留每轮模型调用、搜索词与精简搜索结果、最终 speaker 映射和摘要；完整逐字稿和音频不发送到 Langfuse。上传临时 m4a 在流水线结束时删除；进程异常退出可能遗留的上传文件仅供本机手动清理，不会自动续接收费请求。
 
@@ -53,6 +53,6 @@ YouTube 接入时，扩展负责在页面环境获取字幕或音频，后端只
 
 ## 测试和集成
 
-运行 `node --test tests/agent-*.test.mjs`。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试搜索→观察→再工具、校验错误修复、finalize 截止、预算；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
+运行 `npm test`（会先编译 Agent，再执行全部测试）。ASR 单元测试用 fake fetch 验证 policy/OSS/固定模型提交/轮询/原始与规范化结果，不访问真实百炼；HTTP 注入 asrRunner 验证上传落盘、阶段切换、取消、限流大小及密钥脱敏。使用已安装 Pi faux provider 驱动真实 Agent loop，测试搜索→观察→再工具、校验错误修复、finalize 截止、预算；HTTP 注入 runner 覆盖鉴权、CORS、Host、SSE重放、存储、取消/超时竞态、错误清理、重启恢复。测试不发送真实 API 请求，不收费。
 
 `dist/agent/server.js` 导出异步 `createServer(options)`（返回未 listen 的 Node HTTP Server）和 `startCLI()`。测试可传 root、port、runner、asrRunner、apiKey、bailianApiKey、timeoutMs、asrTimeoutMs、maxAudioBytes、maxTurns、maxToolCalls；生产 CLI 固定默认限制。asrRunner 接收 `{audioPath,context,apiKey,signal}`，返回 `{context,raw,cues,paragraphs}`。`server.connection` 供本地嵌入/测试读取连接信息，不能作为远程无认证接口。

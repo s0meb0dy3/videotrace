@@ -20,6 +20,8 @@ import { EventLog } from './core/event-log.js';
 import { TaskManager } from './core/task-manager.js';
 import type { AgentServer, CreateServerOptions } from './server-types.js';
 import { InMemoryJobQueue } from './core/job-queue.js';
+import { BodyTooLargeError, readRequestBody } from './http-body.js';
+import { SseHub } from './core/sse-hub.js';
 
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
 const json = (response: http.ServerResponse, status: number, value: unknown) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
@@ -35,7 +37,7 @@ function clean(value: unknown, secrets: Array<string | undefined>): any {
   }));
 }
 
-export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, bailianApiKey, searchApiKey, tracing, timeoutMs = 120_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, maxTurns, maxToolCalls = 15, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
+export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, bailianApiKey, searchApiKey, tracing, timeoutMs = 120_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, maxTurns, maxToolCalls = 15, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000, audioIdleTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
   const directory = resolve(root, '.private/agent');
   const taskDirectory = join(directory, 'tasks');
   mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
@@ -60,51 +62,42 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   const faceBrokers = new Map();
   const uploads = new Set();
   const receiveTimers = new Map();
-  const listeners = new Map();
+  const sse = new SseHub();
   // TaskStore/EventLog/TaskManager 形成领域层，HTTP 只负责协议转换和流式输出。
   const store = new TaskStore({ root });
   const eventLog = new EventLog(store, value => clean(value, secrets), 500);
   const manager = new TaskManager({
     store,
     events: eventLog,
-    onEvent: (id, type, data) => {
-      const event = eventLog.list(id).at(-1);
-      if (!event) return;
-      for (const response of listeners.get(id) || []) response.write(`id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
-    },
+    onEvent: (id, event) => sse.broadcast(id, event),
   });
   const tasks = manager.tasks;
-  const publish = (id, type, data) => {
-    const event = eventLog.append(id, type, data);
-    for (const response of listeners.get(id) || []) response.write(`id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
-    return event;
-  };
+  const publish = (id, type, data) => manager.publishAsync(id, type, data);
   manager.load();
   // 启动时清理过期终态任务，避免本地字幕、事件和模型消息无限增长。
   const pruneExpiredTasks = () => {
     const cutoff = Date.now() - taskRetentionMs;
     for (const task of [...tasks.values()]) {
       if (!terminal(task.status) || task.updatedAt > cutoff) continue;
-      store.remove(task.id);
-      eventLog.remove(task.id);
+      void eventLog.removeAsync(task.id).catch(() => {});
       tasks.delete(task.id);
     }
   };
   pruneExpiredTasks();
   const pruneTimer = setInterval(pruneExpiredTasks, Math.min(taskRetentionMs, 60 * 60 * 1000));
   pruneTimer.unref();
-  function finish(task, status, result = undefined, error = undefined) {
+  async function finish(task, status, result = undefined, error = undefined) {
+    if (!task) return;
     clearTimeout(receiveTimers.get(task.id));
     receiveTimers.delete(task.id);
-    const changed = manager.finish(task, status, result ? clean(result, secrets) : undefined, error);
+    const changed = await manager.finishAsync(task, status, result ? clean(result, secrets) : undefined, error);
     if (!changed) return;
     traces.get(task.id)?.end(status, { output: { status, ...(result && resultStats(result)) } });
     traces.delete(task.id);
-    for (const response of listeners.get(task.id) || []) response.end();
-    listeners.delete(task.id);
+    sse.close(task.id);
   }
   function updateStatus(task, status) {
-    manager.updateStatus(task, status);
+    return manager.updateStatusAsync(task, status);
   }
   function runTask(task, audioPath?: string): Promise<void> {
     // 队列等待期间可能已经被取消；终态任务不能再次启动 provider。
@@ -124,9 +117,9 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
       timer = setTimeout(() => { finish(task, 'timed_out', null, message); controller.abort(); }, ms);
       timer.unref();
     };
-    updateStatus(task, audioPath ? 'transcribing' : 'analyzing');
-    startTimer(audioPath ? asrTimeoutMs : timeoutMs, audioPath ? '转写超过30分钟时限' : '分析超过时限');
     return Promise.resolve().then(async () => {
+      await updateStatus(task, audioPath ? 'transcribing' : 'analyzing');
+      startTimer(audioPath ? asrTimeoutMs : timeoutMs, audioPath ? '转写超过30分钟时限' : '分析超过时限');
       if (audioPath) {
         const asr = trace?.child('transcribe-audio', { input: { provider: 'bailian' } });
         let document;
@@ -140,7 +133,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
           throw error;
         }
         task.document = clean(document, secrets);
-        updateStatus(task, 'analyzing');
+        await updateStatus(task, 'analyzing');
         startTimer(timeoutMs, '分析超过时限');
       }
       if (terminal(task.status)) return;
@@ -149,20 +142,20 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         const result = await runner({
           document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, apiKey, webSearch, inspectFaces: broker?.inspect, trace: analysis, maxTurns, maxToolCalls,
           onEvent: event => { if (!terminal(task.status)) publish(task.id, 'pi', event); },
-          onMessages: messages => { if (!terminal(task.status)) store.saveMessages(task.id, clean(messages, secrets)); }
+          onMessages: messages => { if (!terminal(task.status)) return store.saveMessagesAsync(task.id, clean(messages, secrets)); }
         });
         if (terminal(task.status)) return;
         const validated = validateResult(result, prepareDocument(task.document));
         if (Object.values(validated.faces || {}).some(id => id !== null && !broker?.candidates.has(id))) throw new Error('无效头像候选');
         analysis?.end('completed', { output: resultStats(validated) });
-        finish(task, 'completed', validated);
+        await finish(task, 'completed', validated);
       } catch (error) {
         analysis?.end('failed');
         throw error;
       }
     }).catch(() => {
       // HTTP / SSE / 磁盘上仅出现固定错误，不泄露 SDK、路径或凭证。
-      if (!terminal(task.status)) finish(task, 'failed', null, '分析失败，请检查本地配置或稍后重试');
+      if (!terminal(task.status)) void finish(task, 'failed', null, '分析失败，请检查本地配置或稍后重试');
     }).finally(async () => {
       clearTimeout(timer); active.delete(task.id); faceBrokers.delete(task.id);
       if (audioPath) await unlink(audioPath).catch(() => {});
@@ -203,19 +196,14 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
       if (request.method === 'POST' && url.pathname === '/translate') {
         const maxBytes = 1024 ** 2;
         if (Number(request.headers['content-length']) > maxBytes) return json(response, 413, { error: '翻译请求过大' });
-        const chunks = [];
-        let size = 0;
-        for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-          size += chunk.length;
-          if (size > maxBytes) {
-            request.resume();
-            return json(response, 413, { error: '翻译请求过大' });
-          }
-          chunks.push(chunk);
-        }
         let batches;
-        try { batches = translationBatches(JSON.parse(Buffer.concat(chunks).toString('utf8')).cues); }
-        catch { return json(response, 400, { error: '需要非空且 ID 唯一的翻译条目' }); }
+        try {
+          const body = JSON.parse((await readRequestBody(request, maxBytes)).toString('utf8'));
+          batches = translationBatches(body.cues);
+        } catch (error) {
+          if (error instanceof BodyTooLargeError) return json(response, 413, { error: '翻译请求过大' });
+          return json(response, 400, { error: '需要非空且 ID 唯一的翻译条目' });
+        }
         const controller = new AbortController();
         response.once('close', () => controller.abort());
         if (response.destroyed) return;
@@ -232,20 +220,23 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         return;
       }
       if (request.method === 'POST' && url.pathname === '/tasks') {
-        let raw = '';
-        for await (const chunk of request) { raw += chunk; if (Buffer.byteLength(raw) > 16 * 1024 * 1024) return json(response, 413, { error: '请求过大' }); }
         let body;
         try {
+          const raw = (await readRequestBody(request, 16 * 1024 * 1024)).toString('utf8');
           body = JSON.parse(raw);
           if (body.audio !== undefined || body.mode !== 'analyze' || (body.prompt !== undefined && typeof body.prompt !== 'string')) throw new Error();
           if (body.prompt !== undefined && body.prompt.length > 8_000) throw new Error();
           if (body.document !== undefined) { if (body.document.audio !== undefined) throw new Error(); prepareDocument(body.document); }
           else if (!body.context || typeof body.context !== 'object' || Array.isArray(body.context) || body.context.audio !== undefined || Buffer.byteLength(JSON.stringify(body.context)) > 256_000) throw new Error();
-        } catch { return json(response, 400, { error: '需要有效 context 或 document、mode(analyze) 和可选字符串 prompt；音频请单独上传' }); }
+        } catch (error) {
+          if (error instanceof BodyTooLargeError) return json(response, 413, { error: '请求过大' });
+          return json(response, 400, { error: '需要有效 context 或 document、mode(analyze) 和可选字符串 prompt；音频请单独上传' });
+        }
         pruneExpiredTasks();
         if (tasks.size >= maxTasks) return json(response, 429, { error: '任务队列已满，请稍后重试' });
         const task = clean({ id: randomUUID(), status: body.document ? 'queued' : 'receiving_audio', ...(body.document ? { document: body.document } : { context: body.context }), mode: body.mode, ...(body.inspectFaces === true ? { inspectFaces: true } : {}), ...(body.prompt !== undefined ? { prompt: body.prompt } : {}), createdAt: Date.now(), updatedAt: Date.now() }, secrets);
-        manager.add(task); publish(task.id, 'status', { status: task.status });
+        await manager.addAsync(task);
+         await publish(task.id, 'status', { status: task.status });
         if (task.status === 'receiving_audio') {
           const timer = setTimeout(() => {
             receiveTimers.delete(task.id);
@@ -269,20 +260,14 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
       if (request.method === 'POST' && match[2] === 'faces') {
         const broker = faceBrokers.get(task.id);
         if (!broker || task.status !== 'analyzing') return json(response, 409, { error: '采帧请求已结束' });
-        const chunks = [];
-        let bytes = 0;
-        for await (const chunk of request) {
-          bytes += chunk.length;
-          if (bytes > 1024 ** 2) return json(response, 413, { error: '采帧结果过大' });
-          chunks.push(chunk);
-        }
         try {
-          const { requestId, frames } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          const { requestId, frames } = JSON.parse((await readRequestBody(request, 1024 ** 2)).toString('utf8'));
           const accepted = broker.receive(requestId, frames);
           return json(response, accepted ? 200 : 409, { accepted });
         } catch { return json(response, 400, { error: '无效采帧结果' }); }
       }
       if (request.method === 'POST' && match[2] === 'audio') {
+        clearTimeout(requestTimer);
         if (task.status !== 'receiving_audio' || uploads.has(task.id)) return json(response, 409, { error: '任务当前不能接收音频' });
         if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'audio/mp4') return json(response, 415, { error: '需要 Content-Type audio/mp4' });
         if (Number(request.headers['content-length']) > maxAudioBytes) return json(response, 413, { error: '音频超过上传限制' });
@@ -292,15 +277,30 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         let file;
         let size = 0;
         let received = false;
+        let idleTimer;
+        let idleTimedOut = false;
+        const resetIdleTimer = () => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            idleTimedOut = true;
+            if (!response.headersSent) json(response, 408, { error: '音频上传空闲超时' });
+            request.destroy();
+          }, audioIdleTimeoutMs);
+          idleTimer.unref();
+        };
         try {
+          resetIdleTimer();
           file = await open(audioPath, 'w', 0o600);
           for await (const chunk of request) {
+            resetIdleTimer();
             size += chunk.length;
             if (size > maxAudioBytes) { json(response, 413, { error: '音频超过上传限制' }); return; }
             if (terminal(task.status)) { json(response, 409, { error: '任务已结束' }); return; }
             await file.writeFile(chunk);
           }
+          clearTimeout(idleTimer);
           await file.close(); file = undefined;
+          if (idleTimedOut) return;
           if (!size) return json(response, 400, { error: '音频不能为空' });
           if (terminal(task.status)) return json(response, 409, { error: '任务已结束' });
           received = true;
@@ -310,6 +310,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
           upload?.end('completed', { output: { bytes: size } });
           queue.enqueue({ id: task.id, run: () => runTask(task, audioPath) });
         } finally {
+          clearTimeout(idleTimer);
           await file?.close();
           uploads.delete(task.id);
           if (!received) upload?.end('failed', { output: { bytes: size } });
@@ -318,20 +319,25 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         return;
       }
       if (request.method === 'POST' && match[2] === 'cancel') {
-        if (!terminal(task.status)) { finish(task, 'cancelled'); active.get(task.id)?.abort(); }
+        if (!terminal(task.status)) {
+          active.get(task.id)?.abort();
+          await finish(task, 'cancelled');
+        }
         return json(response, 200, { id: task.id, status: task.status });
       }
       if (request.method === 'GET' && match[2] === 'events') {
         const cursor = String(request.headers['last-event-id'] || url.searchParams.get('after') || '0');
         if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor))) return json(response, 400, { error: '事件游标无效' });
+        clearTimeout(requestTimer);
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
         response.flushHeaders();
-        for (const event of eventLog.replay(task.id, Number(cursor))) response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        if (terminal(task.status)) return response.end();
-        if (!listeners.has(task.id)) listeners.set(task.id, new Set());
-        listeners.get(task.id).add(response);
-        const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15_000); heartbeat.unref();
-        response.on('close', () => { clearInterval(heartbeat); listeners.get(task.id)?.delete(response); });
+        sse.subscribe(task.id, response, true);
+        await eventLog.flush(task.id);
+        const replay = eventLog.replay(task.id, Number(cursor));
+        for (const event of replay) sse.writeEvent(response, event);
+        const lastReplayId = replay.at(-1)?.id ?? Number(cursor);
+        sse.resume(task.id, response, lastReplayId);
+        if (terminal(task.status)) return sse.close(task.id);
         return;
       }
       return json(response, 405, { error: '方法不允许' });
@@ -344,10 +350,13 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   server.on('close', () => {
     clearInterval(pruneTimer);
     queue.stop();
-    for (const id of new Set([...active.keys(), ...traces.keys()])) {
-      finish(tasks.get(id), 'cancelled');
-      active.get(id)?.abort();
+    for (const task of tasks.values()) {
+      if (!terminal(task.status)) {
+        void finish(task, 'cancelled');
+        active.get(task.id)?.abort();
+      }
     }
+    void eventLog.flushAll().catch(() => {});
   });
   typedServer.connection = { url: `http://127.0.0.1:${port}`, token, pid: process.pid };
   server.on('listening', () => {

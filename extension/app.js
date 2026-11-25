@@ -178,9 +178,11 @@ const panel = new TranscriptPanel(chrome.runtime.getURL('panel.css'), {
     panel.setTranslationStatus(false);
   }
 });
+const releaseAudio = target => request('clearAudio', { tabId: target.tabId, key: target.key }).catch(() => {});
 const agentView = createAgentView({
   getDocument: () => documentData ? { ...documentData, context } : { context },
   loadAudio: (target, signal) => loadPageAudio({ request, context: target, signal }),
+  releaseAudio,
   captureFaces: (target, times, signal) => createFaceCapture({
     captureFrames: (times, signal) => request('framesAt', { tabId: target.tabId, key: target.key, times }, signal)
   })(times, signal),

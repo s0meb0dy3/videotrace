@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { openAsBlob } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +15,26 @@ export interface TranscriptDocument {
   raw: unknown;
   cues: unknown[];
   paragraphs: unknown[];
+}
+
+interface UploadPolicy {
+  upload_host: string;
+  upload_dir: string;
+  oss_access_key_id: string;
+  signature: string;
+  policy: string;
+  x_oss_object_acl?: string;
+  x_oss_forbid_overwrite?: string;
+}
+
+interface AsrOutput {
+  task_id?: string;
+  task_status?: string;
+  results?: Array<{ subtask_status?: string; transcription_url?: string }>;
+}
+
+interface AsrResponse {
+  output?: AsrOutput;
 }
 
 /** 从环境变量或项目 .env 文件读取百炼密钥。 */
@@ -64,10 +83,10 @@ export async function transcribeAudioFile({ audioPath, context, apiKey, signal, 
     if (!response.ok) throw new Error('百炼转写请求失败');
     return response;
   };
-  const json = async (url: string, options?: RequestInit): Promise<any> => (await request(url, options)).json();
-  const { data: policy } = await json(`${API}/uploads?action=getPolicy&model=${ASR_MODEL}`, { headers: auth });
+  const json = async <T>(url: string, options?: RequestInit): Promise<T> => (await request(url, options)).json() as Promise<T>;
+  const { data: policy } = await json<{ data?: UploadPolicy }>(`${API}/uploads?action=getPolicy&model=${ASR_MODEL}`, { headers: auth });
   if (!policy?.upload_host || !policy.upload_dir || !policy.oss_access_key_id || !policy.signature || !policy.policy) throw new Error('上传授权数据不完整');
-  const uploadHost = cloudUrl(policy.upload_host as string);
+  const uploadHost = cloudUrl(policy.upload_host);
   const key = `${String(policy.upload_dir).replace(/\/$/, '')}/${randomUUID()}.m4a`;
   const form = new FormData();
   for (const [name, value] of Object.entries({
@@ -82,7 +101,7 @@ export async function transcribeAudioFile({ audioPath, context, apiKey, signal, 
   // 使用文件 Blob，避免把大音频一次性读入内存。
   form.append('file', await openAsBlob(audioPath, { type: 'audio/mp4' }), 'audio.m4a');
   await request(uploadHost, { method: 'POST', body: form });
-  const submitted = await json(`${API}/services/audio/asr/transcription`, {
+  const submitted = await json<AsrResponse>(`${API}/services/audio/asr/transcription`, {
     method: 'POST',
     headers: { ...auth, 'Content-Type': 'application/json', 'X-DashScope-Async': 'enable', 'X-DashScope-OssResourceResolve': 'enable' },
     body: JSON.stringify({ model: ASR_MODEL, input: { file_urls: [`oss://${key}`] }, parameters: { channel_id: [0], diarization_enabled: true } })
@@ -90,11 +109,11 @@ export async function transcribeAudioFile({ audioPath, context, apiKey, signal, 
   const taskId = submitted.output?.task_id;
   if (!taskId) throw new Error('转写服务未返回任务 ID');
   while (true) {
-    const { output } = await json(`${API}/tasks/${encodeURIComponent(taskId)}`, { headers: auth });
+    const { output } = await json<AsrResponse>(`${API}/tasks/${encodeURIComponent(taskId)}`, { headers: auth });
     if (output?.task_status === 'SUCCEEDED') {
       const result = output.results?.[0];
       if (result?.subtask_status === 'FAILED' || !result?.transcription_url) throw new Error('百炼音频转写失败');
-      const raw = await json(cloudUrl(result.transcription_url as string));
+      const raw = await json<unknown>(cloudUrl(result.transcription_url));
       const cues = normalizeTranscript(raw) as unknown[];
       return { context, raw, cues, paragraphs: paragraphize(cues) as unknown[] };
     }

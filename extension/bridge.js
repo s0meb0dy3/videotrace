@@ -151,6 +151,10 @@
           data = { type: audioCache.type, size: audioCache.bytes.length };
           break;
         }
+        case 'clearAudio': {
+          if (audioCache?.key === payload.key) audioCache = null;
+          break;
+        }
         case 'audioChunk': {
           const current = assertCurrent(payload.key);
           if (!audioCache || audioCache.key !== current.key) throw new Error('音频缓存已失效，请重新开始转写');

@@ -34,9 +34,10 @@ export class InMemoryJobQueue {
     this.drain();
   }
 
-  stop(): void {
+  stop(): Job[] {
     this.stopped = true;
-    this.pending.length = 0;
+    const pending = this.pending.splice(0);
+    return pending;
   }
 
   private drain(): void {

@@ -1,5 +1,4 @@
-// Agent SDK 的泛型较深，运行时由既有测试覆盖；其余业务逻辑保持显式中文注释。
-// @ts-nocheck
+// Agent SDK 的泛型较深，Provider 边界使用少量显式兼容类型；业务状态保持明确类型。
 import { Agent } from '@earendil-works/pi-agent-core';
 import { createModels } from '@earendil-works/pi-ai';
 import { deepseekProvider } from '@earendil-works/pi-ai/providers/deepseek';
@@ -30,9 +29,9 @@ export interface RunnerOptions {
 /** 从进程环境或 .env 文件读取 DeepSeek 密钥。 */
 export async function loadApiKey(root = process.cwd(), env = process.env): Promise<string | undefined> {
   if (env.DEEPSEEK_API_KEY || env.API_KEY) return env.DEEPSEEK_API_KEY || env.API_KEY;
-  let text;
-  try { text = await readFile(join(root, '.env'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
-  const values = {};
+  let text: string;
+  try { text = await readFile(join(root, '.env'), 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  const values: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
     const match = line.match(/^\s*(?:export\s+)?(DEEPSEEK_API_KEY|API_KEY)\s*=\s*(.*?)\s*$/);
     if (!match) continue;
@@ -71,8 +70,8 @@ export async function runPiTask({ document, prompt, signal, onEvent = () => {}, 
   const pendingImages = new Map();
   const inspectedRanges = new Set();
   const shown = shownCandidateIds instanceof Set ? shownCandidateIds : new Set(shownCandidateIds || []);
-  const content = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: {} });
-  const tools = [
+  const content = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: {} });
+  const tools: any[] = [
     ...(inspectFaces ? [{
       name: 'inspect_faces', label: '检查画面人物', description: '检查当前视频的毫秒时间范围（最多20秒），每秒检测一次并均匀附上最多3张截图。候选只代表某帧中的脸，不证明此人在说话。',
       parameters: { type: 'object', additionalProperties: false, required: ['startMs', 'endMs'], properties: { startMs: { type: 'integer', minimum: 0 }, endMs: { type: 'integer', minimum: 0 } } },
@@ -100,7 +99,7 @@ export async function runPiTask({ document, prompt, signal, onEvent = () => {}, 
     }] : []),
     { name: 'finalize_video_result', label: '提交视频分析', description: '校验并提交最终结果。失败会返回可修复错误；成功后立即停止。', parameters: resultSchema(prepared), execute: async (_id, args) => {
       if (signal?.aborted) throw new Error('任务已取消');
-      if (args.faces && Object.values(args.faces).some(candidateId => candidateId !== null && !shown.has(candidateId))) throw new Error('faces 只能引用已展示的 candidateId');
+      if (args.faces && Object.values(args.faces).some(candidateId => candidateId !== null && typeof candidateId === 'string' && !shown.has(candidateId))) throw new Error('faces 只能引用已展示的 candidateId');
       result = validateResult(args, prepared);
       return { ...content({ accepted: true }), details: { accepted: true, speakers: args.speakers, summary: args.summary }, terminate: true };
     } }
@@ -201,7 +200,11 @@ export async function runPiTask({ document, prompt, signal, onEvent = () => {}, 
       toolSpans.delete(event.toolCallId);
     }
     await onEvent(event);
-    if (event.type === 'turn_end') { turnSpan?.end(event.message.stopReason === 'error' ? 'failed' : 'completed', { output: { stopReason: event.message.stopReason, toolCount: event.toolResults.length } }); turnSpan = undefined; }
+    if (event.type === 'turn_end') {
+      const stopReason = 'stopReason' in event.message ? event.message.stopReason : 'unknown';
+      turnSpan?.end(stopReason === 'error' ? 'failed' : 'completed', { output: { stopReason, toolCount: event.toolResults.length } });
+      turnSpan = undefined;
+    }
     if (event.type === 'message_end' || event.type === 'agent_end') await onMessages(agent.state.messages);
   });
   try {

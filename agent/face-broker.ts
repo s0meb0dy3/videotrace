@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 
 /** 人脸采集的统一输入输出类型，供任务 worker 和页面适配器共享。 */
@@ -13,18 +12,23 @@ export interface FaceBroker {
   receive(requestId: string, frames: unknown): boolean;
 }
 
-// @ts-nocheck
-export function createFaceBroker(publish: (data: unknown) => void, signal: AbortSignal, timeoutMs = 90_000): FaceBroker {
-  let pending;
-  const candidates = new Set();
+interface PendingCapture {
+  requestId: string;
+  times: number[];
+  finish: (frames: FaceFrame[] | null) => void;
+}
+
+export function createFaceBroker(publish: (data: unknown) => void | Promise<unknown>, signal: AbortSignal, timeoutMs = 90_000): FaceBroker {
+  let pending: PendingCapture | undefined;
+  const candidates = new Set<string>();
   return {
     candidates,
     async inspect({ startMs, endMs }) {
       const range = { startMs, endMs };
       const times = Array.from({ length: Math.ceil((endMs - startMs) / 1000) }, (_, i) => startMs + i * 1000);
       const requestId = randomUUID();
-      const frames = await new Promise(resolve => {
-        const finish = value => {
+      const frames = await new Promise<FaceFrame[] | null>(resolve => {
+        const finish = (value: FaceFrame[] | null) => {
           clearTimeout(timer);
           signal.removeEventListener('abort', abort);
           pending = undefined;
@@ -35,7 +39,7 @@ export function createFaceBroker(publish: (data: unknown) => void, signal: Abort
         if (signal.aborted) return abort();
         pending = { requestId, times, finish };
         signal.addEventListener('abort', abort, { once: true });
-        publish({ requestId, times, deadline: Date.now() + timeoutMs });
+        void publish({ requestId, times, deadline: Date.now() + timeoutMs });
       });
       if (!frames?.length) return { status: 'unavailable', range, detections: [], representativeFrames: [] };
       const detections = [];

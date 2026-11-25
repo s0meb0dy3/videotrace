@@ -1,5 +1,7 @@
 /** 任务文件持久化：只负责读写 JSON，不参与任务业务状态流转。 */
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmod, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import type { Task } from './types.js';
 
@@ -11,6 +13,7 @@ export interface TaskStoreOptions {
 export class TaskStore {
   readonly directory: string;
   readonly taskDirectory: string;
+  private readonly lanes = new Map<string, Promise<void>>();
 
   constructor({ root, directory = '.private/agent' }: TaskStoreOptions) {
     this.directory = resolve(root, directory);
@@ -26,7 +29,7 @@ export class TaskStore {
     return join(this.taskDirectory, `${id}${suffix}`);
   }
 
-  /** 原子替换任务文件，避免进程中断时留下半个 JSON。 */
+  /** 同步保存仅供启动恢复等同步代码；HTTP 热路径使用 saveAsync。 */
   save(task: Task): void {
     const target = this.pathFor(task.id);
     const temporary = `${target}.tmp`;
@@ -35,10 +38,14 @@ export class TaskStore {
     renameSync(temporary, target);
   }
 
+  saveAsync(task: Task): Promise<void> {
+    const serialized = JSON.stringify(task);
+    return this.enqueue(task.id, () => this.atomicWrite(this.pathFor(task.id), serialized));
+  }
+
   /** messages 只保存最近一次快照；调试内容过大时截断，避免无限增长。 */
   saveMessages(id: string, messages: unknown): void {
     const serialized = JSON.stringify(messages);
-    // 截断必须仍然是合法 JSON，否则重启后的调试工具无法读取快照。
     const bounded = serialized.length > 2_000_000
       ? JSON.stringify({ truncated: true, originalBytes: Buffer.byteLength(serialized) })
       : serialized;
@@ -49,7 +56,49 @@ export class TaskStore {
     renameSync(temporary, target);
   }
 
-  /** 启动时隔离损坏任务文件，单个坏文件不应阻断整个服务。 */
+  saveMessagesAsync(id: string, messages: unknown): Promise<void> {
+    const serialized = JSON.stringify(messages);
+    const bounded = serialized.length > 2_000_000
+      ? JSON.stringify({ truncated: true, originalBytes: Buffer.byteLength(serialized) })
+      : serialized;
+    return this.enqueue(id, () => this.atomicWrite(this.pathFor(id, '.messages.json'), bounded));
+  }
+
+  appendEventAsync(id: string, event: unknown): Promise<void> {
+    const serialized = `${JSON.stringify(event)}\n`;
+    return this.enqueue(id, () => writeFile(this.pathFor(id, '.events.jsonl'), serialized, { flag: 'a', mode: 0o600 }));
+  }
+
+  private async atomicWrite(target: string, content: string): Promise<void> {
+    const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await writeFile(temporary, content, { mode: 0o600 });
+      await chmod(temporary, 0o600);
+      await rename(temporary, target);
+    } catch (error) {
+      await unlink(temporary).catch(() => {});
+      throw error;
+    }
+  }
+
+  private enqueue(id: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.lanes.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(operation);
+    this.lanes.set(id, next);
+    next.then(() => {
+      if (this.lanes.get(id) === next) this.lanes.delete(id);
+    }, () => {
+      if (this.lanes.get(id) === next) this.lanes.delete(id);
+    });
+    return next;
+  }
+
+  flush(id: string): Promise<void> { return this.lanes.get(id) || Promise.resolve(); }
+
+  async flushAll(): Promise<void> {
+    while (this.lanes.size) await Promise.all([...this.lanes.values()]);
+  }
+
   loadTasks(): Task[] {
     const tasks: Task[] = [];
     for (const name of readdirSync(this.taskDirectory).filter(name => /^[\da-f-]{36}\.json$/.test(name))) {
@@ -65,7 +114,6 @@ export class TaskStore {
     return tasks;
   }
 
-  /** 删除任务的附属文件；历史任务 GC 由上层按 TTL 调用。 */
   remove(id: string): void {
     for (const suffix of ['.json', '.events.jsonl', '.messages.json']) {
       try { unlinkSync(this.pathFor(id, suffix)); } catch (error) {
@@ -74,9 +122,32 @@ export class TaskStore {
     }
   }
 
+  async removeAsync(id: string): Promise<void> {
+    await this.enqueue(id, async () => {
+      for (const suffix of ['.json', '.events.jsonl', '.messages.json']) {
+        await unlink(this.pathFor(id, suffix)).catch(error => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        });
+      }
+    });
+  }
+
   readEvents(id: string): unknown[] {
     try {
       const text = readFileSync(this.pathFor(id, '.events.jsonl'), 'utf8').trim();
+      return text ? text.split('\n').filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      }) : [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  }
+
+  async readEventsAsync(id: string): Promise<unknown[]> {
+    await this.flush(id);
+    try {
+      const text = (await readFile(this.pathFor(id, '.events.jsonl'), 'utf8')).trim();
       return text ? text.split('\n').filter(Boolean).flatMap(line => {
         try { return [JSON.parse(line)]; } catch { return []; }
       }) : [];
