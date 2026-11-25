@@ -55,7 +55,7 @@ export async function loadModelConfig(root = process.cwd(), env = process.env, a
   const get = (name: string) => env[name] || values[name];
   const provider = get('AI_PROVIDER') || 'deepseek';
   const model = get('AI_MODEL') || (provider === 'deepseek' ? 'deepseek-flash' : 'qwen3.8-flash');
-  const resolvedKey = apiKey || get('AI_API_KEY') || get('DEEPSEEK_API_KEY') || get('API_KEY');
+  const resolvedKey = apiKey || get('AI_API_KEY') || (provider === 'bailian' ? get('BAILIAN_API_KEY') : undefined) || get('DEEPSEEK_API_KEY') || get('API_KEY');
   const baseUrl = get('AI_BASE_URL') || (provider === 'deepseek' ? 'https://api.deepseek.com' : 'https://dashscope.aliyuncs.com/compatible-mode/v1');
   return { provider, model, apiKey: resolvedKey, baseUrl, maxTokens: Number(get('AI_MAX_TOKENS') || 8192), contextWindow: Number(get('AI_CONTEXT_WINDOW') || 128000), input: ['text', 'image'], reasoning: get('AI_REASONING') !== 'false' };
 }
@@ -72,9 +72,12 @@ export function createOpenAICompatibleRuntime(config: ModelConfig): Runtime {
     provider: config.provider,
     baseUrl: config.baseUrl,
     input: config.input || ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     reasoning: config.reasoning ?? false,
     contextWindow: config.contextWindow || 128000,
-    maxTokens: config.maxTokens || 8192
+    maxTokens: config.maxTokens || 8192,
+    // 百炼兼容接口不接受 OpenAI 的 developer role，PIAI 会将系统消息改发为 system。
+    compat: { supportsDeveloperRole: false }
   };
   return { model, streamFn: (selected, context, options) => streamSimple(selected, context, { ...options, apiKey: config.apiKey, maxTokens: config.maxTokens || 8192 }) };
 }

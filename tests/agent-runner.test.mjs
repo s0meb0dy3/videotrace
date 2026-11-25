@@ -93,4 +93,5 @@ test('OpenAI-compatible runtime accepts configurable provider and model', async 
   assert.equal(await loadApiKey('/unused', { API_KEY: 'generic', DEEPSEEK_API_KEY: 'specific' }), 'specific');
   const config = await loadModelConfig('/unused', { AI_PROVIDER: 'bailian', AI_MODEL: 'qwen3.8-flash', AI_API_KEY: 'bailian-key', AI_BASE_URL: 'https://example.test/v1' });
   assert.deepEqual(config, { provider: 'bailian', model: 'qwen3.8-flash', apiKey: 'bailian-key', baseUrl: 'https://example.test/v1', maxTokens: 8192, contextWindow: 128000, input: ['text', 'image'], reasoning: true });
+  assert.equal((await loadModelConfig('/unused', { AI_PROVIDER: 'bailian', BAILIAN_API_KEY: 'asr-key' })).apiKey, 'asr-key');
 });

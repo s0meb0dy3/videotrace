@@ -6,7 +6,7 @@
 
 在项目根目录运行 `npm run agent:dev`。该命令会先执行 `npm run build:agent`，再启动编译后的 `dist/agent/server.js`。服务只监听 `127.0.0.1:43127`，端口占用会安全失败，不切换地址或端口。
 
-主分析模型通过 OpenAI-compatible Chat Completions 配置。默认读取 `DEEPSEEK_API_KEY`（兼容 `API_KEY`），也可使用通用配置：`AI_PROVIDER`、`AI_MODEL`、`AI_API_KEY`、`AI_BASE_URL`、`AI_MAX_TOKENS`、`AI_CONTEXT_WINDOW` 和 `AI_REASONING`。例如百炼可配置 `AI_PROVIDER=bailian`、`AI_MODEL=qwen3.8-flash`、`AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`AI_API_KEY=...`。DeepSeek 默认仍为 `deepseek-flash` 和 `https://api.deepseek.com`。PIAI 负责 OpenAI-compatible 请求、流式响应和工具调用；模型地址与 ID 由本地配置提供，不从浏览器请求接收。支持引号和 `export KEY=...`，不要把真实密钥发送到聊天或提交到 Git。
+主分析模型通过 OpenAI-compatible Chat Completions 配置。默认读取 `DEEPSEEK_API_KEY`（兼容 `API_KEY`）；当 `AI_PROVIDER=bailian` 且未设置 `AI_API_KEY` 时也会使用 `BAILIAN_API_KEY`。也可使用通用配置：`AI_PROVIDER`、`AI_MODEL`、`AI_API_KEY`、`AI_BASE_URL`、`AI_MAX_TOKENS`、`AI_CONTEXT_WINDOW` 和 `AI_REASONING`。例如百炼可配置 `AI_PROVIDER=bailian`、`AI_MODEL=qwen3.8-flash`、`AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`AI_API_KEY=...`。DeepSeek 默认仍为 `deepseek-flash` 和 `https://api.deepseek.com`。PIAI 负责 OpenAI-compatible 请求、流式响应和工具调用；模型地址与 ID 由本地配置提供，不从浏览器请求接收。百炼兼容接口不接受 `developer` role，运行时已设置 PIAI 的 `supportsDeveloperRole: false`；模型描述也包含必要的成本字段，避免工具调用后的本地追踪错误。支持引号和 `export KEY=...`，不要把真实密钥发送到聊天或提交到 Git。
 
 音频转写使用本机环境变量 `BAILIAN_API_KEY`（优先）或 `BAILIAN_KEY`，也支持根目录 `.env` 的同名配置。密钥仅由后台读取，不从请求接收，不进入任务和日志。固定北京地域百炼 API，模型固定为 `qwen-audio-3.1-asr-flash-filetrans`。网页负责在 B站页面环境下载音频（保留页面的 CDN 访问条件），然后上传给本服务；服务不直接拉取客户端提供的音频 URL，也不接收 JSON/base64 音频。
 
