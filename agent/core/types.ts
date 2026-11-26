@@ -22,6 +22,12 @@ export interface Task {
   prompt?: string;
   inspectFaces?: boolean;
   result?: JsonObject;
+  sessionKey?: string;
+  traceTurn?: number;
+  previousTaskId?: string;
+  answer?: string;
+  speakerState?: { speakers: Record<string, string>; faces: Record<string, string | null>; summary?: string };
+  avatarSources?: Record<string, { image: string; box: number[] }>;
   error?: string;
   createdAt: number;
   updatedAt: number;

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
-import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText } from '@earendil-works/pi-ai';
 import { createServer } from '../dist/agent/server.js';
 import { initializeTracing } from '../dist/agent/tracing.js';
 import { runPiTask } from '../dist/agent/runner.js';
@@ -32,9 +32,11 @@ test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文'
   const model = faux.getModel();
   const models = createModels(); models.setProvider(faux.provider);
   const result = { speakers: { '0': '主持人' }, summary: 'PRIVATE_SUMMARY' };
-  // 首次提交缺少说话人标签，下一轮修正，用来验证真实工具的分层追踪。
-  faux.setResponses([{ ...fauxAssistantMessage([fauxToolCall('finalize_video_result', { ...result, speakers: {} })]), stopReason: 'toolUse' },
-    { ...fauxAssistantMessage([fauxToolCall('finalize_video_result', result)]), stopReason: 'toolUse' }]);
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall('update_speaker', { speakerId: '0', label: '主持人' })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage([fauxToolCall('update_summary', { summary: result.summary })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage([fauxText('已完成分析')])
+  ]);
   const document = { context: { title: 'PRIVATE_TITLE' }, cues: [{ id: '1', speakerId: '0', startMs: 0, endMs: 100, text: 'PRIVATE_TRANSCRIPT' }] };
   const app = await createServer({ root, tracing, apiKey: 'sk-provider-test', asrRunner: async () => document, runner: options => runPiTask({
     ...options,
@@ -67,11 +69,15 @@ test('HTTP 任务通过 Langfuse SDK 导出分层观测，不上传敏感正文'
     ['receive-audio', 'transcribe-audio', 'analyze-transcript']);
   assert.equal(agent.parentSpanId, rootSpan.spanId);
   assert.deepEqual(spans.filter(span => span.parentSpanId === agent.spanId).map(span => span.name),
-    ['turn-1', 'turn-2']);
-  assert.deepEqual(spans.filter(span => span.name === 'turn-1').flatMap(turn => spans.filter(span => span.parentSpanId === turn.spanId).map(span => span.name)),
-    ['generate-video-analysis', 'finalize_video_result']);
-  assert.deepEqual(spans.filter(span => span.name === 'turn-2').flatMap(turn => spans.filter(span => span.parentSpanId === turn.spanId).map(span => span.name)),
-    ['generate-video-analysis', 'finalize_video_result']);
+    ['turn-1', 'turn-2', 'turn-3']);
+  for (const [index, childNames] of [
+    [1, ['generate-video-analysis', 'update_speaker']],
+    [2, ['generate-video-analysis', 'update_summary']],
+    [3, ['generate-video-analysis']]
+  ]) {
+    const turn = spans.find(span => span.name === `turn-${index}`);
+    assert.deepEqual(spans.filter(span => span.parentSpanId === turn.spanId).map(span => span.name), childNames);
+  }
   const generation = spans.find(span => span.name === 'generate-video-analysis');
   assert.ok(generation.attributes.some(({ key }) => key === 'langfuse.observation.usage_details'));
   assert.ok(spans.every(span => span.traceId === rootSpan.traceId));

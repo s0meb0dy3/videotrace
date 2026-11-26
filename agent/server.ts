@@ -20,6 +20,8 @@ import type { AgentServer, CreateServerOptions } from './server-types.js';
 import { InMemoryJobQueue } from './core/job-queue.js';
 import { BodyTooLargeError, readRequestBody } from './http-body.js';
 import { SseHub } from './core/sse-hub.js';
+import type { Task } from './core/types.js';
+import { SessionTrace } from './session-trace.js';
 
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
 const json = (response: http.ServerResponse, status: number, value: unknown) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
@@ -35,7 +37,7 @@ function clean(value: unknown, secrets: Array<string | undefined>): any {
   }));
 }
 
-export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, modelConfig, bailianApiKey, tracing, timeoutMs = 120_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, maxTurns, maxToolCalls = 15, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000, audioIdleTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
+export async function createServer({ root = process.cwd(), port = 43127, runner = runPiTask, asrRunner = transcribeAudioFile, apiKey, modelConfig, bailianApiKey, tracing, timeoutMs = 200_000, asrTimeoutMs = 30 * 60_000, maxAudioBytes = 512 * 1024 ** 2, translationFetch = fetch, translationTimeoutMs = 120_000, maxTasks = 500, maxConcurrentTasks = 2, audioReceiveTimeoutMs = 10 * 60_000, taskRetentionMs = 7 * 24 * 60 * 60 * 1000, requestTimeoutMs = 5 * 60_000, audioIdleTimeoutMs = 5 * 60_000 }: CreateServerOptions = {}): Promise<AgentServer> {
   const directory = resolve(root, '.private/agent');
   const taskDirectory = join(directory, 'tasks');
   mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
@@ -47,6 +49,8 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   modelConfig ??= await loadModelConfig(root, process.env, apiKey);
   modelConfig.apiKey ??= apiKey;
   apiKey = modelConfig.apiKey;
+  // 翻译仍使用独立的 DeepSeek 接口，不向它发送其他服务的密钥。
+  const translationApiKey = modelConfig.baseUrl.replace(/\/$/, '') === 'https://api.deepseek.com' ? apiKey : undefined;
   bailianApiKey ??= await loadBailianApiKey(root);
   const token = randomBytes(32).toString('hex');
   const secrets = [apiKey, bailianApiKey, token];
@@ -60,14 +64,34 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   // TaskStore/EventLog/TaskManager 形成领域层，HTTP 只负责协议转换和流式输出。
   const store = new TaskStore({ root });
   const eventLog = new EventLog(store, value => clean(value, secrets), 500);
+  const sessionTrace = new SessionTrace(join(directory, 'traces'));
+  // 调试日志写入失败不应影响分析或侧栏；不输出原始异常和请求内容。
+  const reportTraceError = () => console.warn('本地 Agent 轨迹写入失败');
+  const recordEvent = (id, event) => {
+    sse.broadcast(id, event);
+    const task = manager.tasks.get(id);
+    if (task) return sessionTrace.record(task, event).catch(reportTraceError);
+  };
+  const recoveredEvents: Array<Promise<void> | undefined> = [];
   const manager = new TaskManager({
     store,
     events: eventLog,
-    onEvent: (id, event) => sse.broadcast(id, event),
+    onEvent: (id, event) => {
+      const write = recordEvent(id, event);
+      if (recovering) recoveredEvents.push(write);
+      return write;
+    },
   });
   const tasks = manager.tasks;
   const publish = (id, type, data) => manager.publishAsync(id, type, data);
+  let recovering = true;
   manager.load();
+  recovering = false;
+  await Promise.all(recoveredEvents);
+  const keyOf = (task: Task) => task.sessionKey ?? (task.context ?? task.document?.context as Task['context'])?.key;
+  const sessionTasks = (key: string) => [...tasks.values()].filter(task => keyOf(task) === key)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const sessionsStarting = new Set<string>();
   // 启动时清理过期终态任务，避免本地字幕、事件和模型消息无限增长。
   const pruneExpiredTasks = () => {
     const cutoff = Date.now() - taskRetentionMs;
@@ -103,7 +127,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
     const controller = new AbortController();
     const trace = traces.get(task.id);
     active.set(task.id, controller);
-    const broker = task.inspectFaces ? createFaceBroker(data => publish(task.id, 'capture_faces', data), controller.signal) : undefined;
+    const broker = task.inspectFaces ? createFaceBroker(data => publish(task.id, 'capture_faces', data), controller.signal, keyOf(task) ? 3_000 : undefined) : undefined;
     if (broker) faceBrokers.set(task.id, broker);
     let timer;
     const startTimer = (ms, message) => {
@@ -131,17 +155,59 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         startTimer(timeoutMs, '分析超过时限');
       }
       if (terminal(task.status)) return;
+      if (keyOf(task)) await publish(task.id, 'transcript_ready', {});
       const analysis = trace?.child('analyze-transcript', { input: documentStats(task.document) }, 'agent');
       try {
+        const prepared = prepareDocument(task.document);
+        const key = keyOf(task);
+        const state = task.speakerState = {
+          speakers: { ...Object.fromEntries(prepared.speakerIds.map((id, i) => [id, `说话人 ${i + 1}`])), ...task.speakerState?.speakers },
+          faces: { ...task.speakerState?.faces },
+          summary: task.speakerState?.summary
+        };
+        const applyAvatar = (speakerId: string, candidateId: string | null) => {
+          const source = candidateId === null ? undefined : broker?.sources.get(candidateId);
+          if (candidateId !== null && !source) throw new Error('无效头像候选');
+          if (source && key) (task.avatarSources ??= Object.create(null))[speakerId] = source;
+          else if (task.avatarSources) delete task.avatarSources[speakerId];
+          state.faces = { ...state.faces, [speakerId]: candidateId };
+        };
+        const history = typeof key === 'string' && task.previousTaskId ? sessionTasks(key)
+          .slice(0, -1).slice(-12).flatMap(previous => [
+            { role: 'user', content: previous.prompt ?? '分析这个视频' },
+            ...(previous.answer || previous.result?.summary ? [{ role: 'assistant', content: previous.answer ?? previous.result.summary }] : [])
+          ]) : [];
         const result = await runner({
-          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, apiKey, modelConfig, inspectFaces: broker?.inspect, trace: analysis, maxTurns, maxToolCalls,
-          onEvent: event => { if (!terminal(task.status)) publish(task.id, 'pi', event); },
+          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, modelConfig, inspectFaces: broker?.inspect, trace: analysis,
+          ...(task.previousTaskId ? { conversation: { history, result: { ...state, summary: state.summary ?? '' } } } : {}),
+          onSpeakerUpdate: async patch => {
+            const safe = clean(patch, secrets);
+            if (!await manager.updateAnalysisAsync(task, 'speaker_updated', safe, () => {
+              if (safe.candidateId !== undefined && safe.candidateId !== state.faces[safe.speakerId]) applyAvatar(safe.speakerId, safe.candidateId);
+              if (safe.label !== undefined) state.speakers[safe.speakerId] = safe.label;
+            })) throw new Error('回合已结束');
+          },
+          onSummaryUpdate: async summary => {
+            const safe = clean(summary, secrets);
+            if (!await manager.updateAnalysisAsync(task, 'summary_updated', { summary: safe }, () => { state.summary = safe; })) throw new Error('回合已结束');
+          },
+          onEvent: event => { if (!terminal(task.status)) void publish(task.id, 'pi', event); },
           onMessages: messages => { if (!terminal(task.status)) return store.saveMessagesAsync(task.id, clean(messages, secrets)); }
         });
         if (terminal(task.status)) return;
-        const validated = validateResult(result, prepareDocument(task.document));
-        if (Object.values(validated.faces || {}).some(id => id !== null && !broker?.candidates.has(id))) throw new Error('无效头像候选');
-        analysis?.end('completed', { output: resultStats(validated) });
+        const answer = typeof result.answer === 'string' ? clean(result.answer, secrets) : undefined;
+        const { answer: _answer, faces, ...analysisFields } = result;
+        const analysisResult = { ...analysisFields, ...(faces && Object.keys(faces).length ? { faces } : {}) };
+        const validated = !result.summary && answer ? undefined : validateResult(analysisResult, prepared);
+        for (const [id, candidate] of Object.entries(validated?.faces ?? {})) {
+          if (candidate !== state.faces[id]) applyAvatar(id, candidate);
+        }
+        if (validated) {
+          state.speakers = clean(validated.speakers, secrets);
+          state.summary = clean(validated.summary, secrets);
+        }
+        task.answer = answer;
+        analysis?.end('completed', { output: validated ? resultStats(validated) : { answerChars: answer?.length ?? 0 } });
         await finish(task, 'completed', validated);
       } catch (error) {
         analysis?.end('failed');
@@ -203,7 +269,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         if (response.destroyed) return;
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(translationTimeoutMs)]);
         try {
-          const result = await translateBatches(batches, { apiKey, signal, fetchImpl: translationFetch, concurrency: 3 });
+          const result = await translateBatches(batches, { apiKey: translationApiKey, signal, fetchImpl: translationFetch, concurrency: 3 });
           if (!response.destroyed) json(response, 200, result);
         } catch (error) {
           if (!response.destroyed) {
@@ -213,14 +279,21 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         }
         return;
       }
+      if (request.method === 'GET' && url.pathname === '/session') {
+        const key = url.searchParams.get('key');
+        if (!key || key.length > 512) return json(response, 400, { error: '视频会话标识无效' });
+        return json(response, 200, { tasks: sessionTasks(key).map(({ document, speakerState, avatarSources, result, ...turn }) => ({ ...turn, summary: result?.summary ?? speakerState?.summary })) });
+      }
       if (request.method === 'POST' && url.pathname === '/tasks') {
         let body;
         try {
           const raw = (await readRequestBody(request, 16 * 1024 * 1024)).toString('utf8');
           body = JSON.parse(raw);
-          if (body.audio !== undefined || body.mode !== 'analyze' || (body.prompt !== undefined && typeof body.prompt !== 'string')) throw new Error();
+          if (body.audio !== undefined || (body.previousTaskId === undefined && body.mode !== 'analyze') || (body.prompt !== undefined && typeof body.prompt !== 'string')) throw new Error();
           if (body.prompt !== undefined && body.prompt.length > 8_000) throw new Error();
-          if (body.document !== undefined) { if (body.document.audio !== undefined) throw new Error(); prepareDocument(body.document); }
+          if (body.previousTaskId !== undefined) {
+            if (typeof body.previousTaskId !== 'string' || !body.prompt?.trim() || body.document !== undefined || body.context !== undefined) throw new Error();
+          } else if (body.document !== undefined) { if (body.document.audio !== undefined) throw new Error(); prepareDocument(body.document); }
           else if (!body.context || typeof body.context !== 'object' || Array.isArray(body.context) || body.context.audio !== undefined || Buffer.byteLength(JSON.stringify(body.context)) > 256_000) throw new Error();
         } catch (error) {
           if (error instanceof BodyTooLargeError) return json(response, 413, { error: '请求过大' });
@@ -228,9 +301,27 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         }
         pruneExpiredTasks();
         if (tasks.size >= maxTasks) return json(response, 429, { error: '任务队列已满，请稍后重试' });
-        const task = clean({ id: randomUUID(), status: body.document ? 'queued' : 'receiving_audio', ...(body.document ? { document: body.document } : { context: body.context }), mode: body.mode, ...(body.inspectFaces === true ? { inspectFaces: true } : {}), ...(body.prompt !== undefined ? { prompt: body.prompt } : {}), createdAt: Date.now(), updatedAt: Date.now() }, secrets);
-        await manager.addAsync(task);
-         await publish(task.id, 'status', { status: task.status });
+        const previous = tasks.get(body.previousTaskId);
+        if (body.previousTaskId !== undefined && (!previous?.document || !terminal(previous.status) || !keyOf(previous))) {
+          return json(response, 409, { error: '上一回合尚未结束或没有可复用的转写' });
+        }
+        const rawKey = previous ? keyOf(previous) : (body.document?.context ?? body.context)?.key;
+        const sessionKey = typeof rawKey === 'string' && rawKey.length <= 512 && rawKey ? rawKey : undefined;
+        const latest = sessionKey ? sessionTasks(sessionKey).at(-1) : undefined;
+        if (sessionKey && (sessionsStarting.has(sessionKey) || (latest && !terminal(latest.status)) || (previous && latest?.id !== previous.id))) {
+          return json(response, 409, { error: '此视频已有进行中的回合，或会话已更新' });
+        }
+        const task: Task = clean({ id: randomUUID(), status: (body.document || previous) ? 'queued' : 'receiving_audio', ...(body.document ? { document: body.document } : { context: body.context }), mode: 'analyze',
+          ...(sessionKey ? { sessionKey } : {}),
+          ...(previous ? { previousTaskId: previous.id, document: previous.document, speakerState: previous.speakerState ?? previous.result, avatarSources: previous.avatarSources } : {}), ...(body.inspectFaces === true ? { inspectFaces: true } : {}), ...(body.prompt !== undefined ? { prompt: body.prompt } : {}), createdAt: Date.now(), updatedAt: Date.now() }, secrets);
+        if (sessionKey) sessionsStarting.add(sessionKey);
+        try {
+          // 上次任务先写完终态，再往同一个会话文件追加新一轮。
+          if (latest) await manager.flush(latest.id);
+          await sessionTrace.start(task).catch(reportTraceError);
+          await manager.addAsync(task);
+          await publish(task.id, 'status', { status: task.status });
+        } finally { if (sessionKey) sessionsStarting.delete(sessionKey); }
         if (task.status === 'receiving_audio') {
           const timer = setTimeout(() => {
             receiveTimers.delete(task.id);
@@ -241,7 +332,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         }
         if (tracing) traces.set(task.id, tracing.start('analyze-video', {
           metadata: { taskId: task.id }, input: task.document
-            ? { source: 'cached-transcript', ...documentStats(task.document) } : { source: 'audio' }
+            ? { source: 'cached-transcript', ...documentStats(prepareDocument(task.document)) } : { source: 'audio' }
         }));
         json(response, 202, { id: task.id, status: task.status });
         if (task.document) queue.enqueue({ id: task.id, run: () => runTask(task) });
@@ -326,7 +417,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
         response.flushHeaders();
         sse.subscribe(task.id, response, true);
-        await eventLog.flush(task.id);
+        await manager.flush(task.id);
         const replay = eventLog.replay(task.id, Number(cursor));
         for (const event of replay) sse.writeEvent(response, event);
         const lastReplayId = replay.at(-1)?.id ?? Number(cursor);

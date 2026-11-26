@@ -61,6 +61,18 @@ export class TaskManager {
     });
   }
 
+  updateAnalysisAsync(task: Task, type: string, data: unknown, apply: () => void): Promise<boolean> {
+    return this.enqueue(task.id, async () => {
+      if (task.status !== 'analyzing') return false;
+      apply();
+      task.updatedAt = Date.now();
+      await this.store.saveAsync(task);
+      const event = await this.events.appendAsync(task.id, type, data);
+      await this.onEvent?.(task.id, event);
+      return true;
+    });
+  }
+
   updateStatusAsync(task: Task, status: TaskStatus): Promise<boolean> {
     return this.enqueue(task.id, async () => {
       if (isTerminalStatus(task.status) || !canTransition(task.status, status)) return false;
@@ -88,6 +100,9 @@ export class TaskManager {
       return true;
     });
   }
+
+  /** 等待该任务已排队的状态和事件完成写入。 */
+  flush(id: string): Promise<void> { return this.lanes.get(id) ?? Promise.resolve(); }
 
   private enqueue<T>(id: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.lanes.get(id) || Promise.resolve();

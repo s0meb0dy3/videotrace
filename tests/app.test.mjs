@@ -29,17 +29,18 @@ async function environment({ cached = true } = {}) {
   let seek = async () => ({ playBlocked: false });
   let agentAnalyze = async () => {};
   let agentCancel = () => {};
+  let agentDetach = () => {};
   let agentOptions;
   let translate = () => assert.fail('unexpected translation');
   class Panel {
-    constructor(_style, handlers) { this.handlers = handlers; this.aside = { insertBefore() {} }; this.isOpen = true; this.activeCalls = []; }
+    constructor(_style, handlers) { this.handlers = handlers; this.aside = { insertBefore() {} }; this.isOpen = true; this.activeCalls = []; this.chat = { setState() {}, setTasks() {}, addEvent() {} }; this.reading = { view: 'transcript' }; }
     setAvailable(v) { this.available = v; } setContext(v) { this.context = v; } clear() { this.rendered = null; this.active = null; }
     setStatus(m, o = {}) { this.status = m; this.statusOptions = o; } renderDocument(v, options) { this.rendered = v; this.bilingual = Boolean(options?.bilingual && options.translations); this.translations = options?.translations; }
     restoreState({ manualReading, ...state }) { this.reading = { ...state, bilingual: this.bilingual }; }
     getState() { return this.reading; }
     setTranslationStatus(pending, message) { this.translationStatus = { pending, message }; }
     setFollow(v) { this.follow = v; } setActive(v) { this.active = v; this.activeCalls.push(v); }
-    setTaskState(v) { this.taskState = v; } setSummary(v) { this.summary = v; }
+    setTaskState(v) { this.taskState = v; } setBusy() {} setSummary(v) { this.summary = v; }
   }
   const request = async (action, payload) => {
     calls.push({ action, payload });
@@ -50,7 +51,7 @@ async function environment({ cached = true } = {}) {
   };
   const scope = {
     createAgentClient: () => ({ translate }),
-    loadPageAudio, initialAvatar, createAgentView: options => { agentOptions = options; return { host: {}, analyze: () => agentAnalyze(options), cancel: () => agentCancel(options) }; },
+    loadPageAudio, initialAvatar, paragraphize, createAgentView: options => { agentOptions = options; return { host: {}, analyze: () => agentAnalyze(options), cancel: async () => agentCancel(options), detach: () => agentDetach(), restore: async () => {} }; },
     createTabBridge: () => request, TranscriptPanel: Panel, activeCueAt,
     readStored: async key => { reads.push(key); return storage.get(key); },
     writeStored: async (key, value) => { writes.push({ key, value: structuredClone(value) }); storage.set(key, structuredClone(value)); },
@@ -63,7 +64,7 @@ async function environment({ cached = true } = {}) {
   await flush();
   return { ...scope.hooks, storage, calls, reads, writes, messages, intervals, getAgentOptions: () => agentOptions,
     setTranslate: fn => { translate = fn; },
-    setAgentAnalyze: fn => { agentAnalyze = fn; }, setAgentCancel: fn => { agentCancel = fn; }, setPlayback: fn => { playback = fn; }, setSeek: fn => { seek = fn; },
+    setAgentAnalyze: fn => { agentAnalyze = fn; }, setAgentCancel: fn => { agentCancel = fn; }, setAgentDetach: fn => { agentDetach = fn; }, setPlayback: fn => { playback = fn; }, setSeek: fn => { seek = fn; },
     emit: (name, ...args) => listeners[name](...args), switchTab: (id, supported = true) => { tabId = id; available = supported; context = { ...context, tabId: id }; }
   };
 }
@@ -71,7 +72,7 @@ async function environment({ cached = true } = {}) {
 test('startup restores cached document without cloud calls or key reads', async () => {
   const app = await environment();
   assert.deepEqual(plain(app.getData()), { ...documentData(), avatars: {} });
-  assert.deepEqual(app.reads, ['settings', resultKey, avatarKey, readingKey, translationKey]);
+  assert.deepEqual(app.reads, ['settings', resultKey, readingKey, avatarKey, translationKey]);
   assert.deepEqual(app.calls.map(c => c.action), ['snapshot', 'playback']);
   assert.equal(app.messages.length, 0);
 });
@@ -126,10 +127,11 @@ test('unsupported tabs isolate and clear the manuscript', async () => {
   assert.equal(app.getData(), null); assert.equal(app.panel.available, false); assert.equal(app.panel.isOpen, true); assert.match(app.panel.status, /打开 B站视频/);
 });
 
-test('switching tabs cancels analysis and prevents stale rendering', async () => {
-  const app = await environment(); let cancelled = 0; app.setAgentCancel(() => { cancelled++; });
-  app.panel.handlers.cancelTask(); app.switchTab(20); app.emit('onActivated', { tabId: 20, windowId: 1 }); await flush();
-  assert.ok(cancelled >= 1); assert.equal(app.getData().context.tabId, 20);
+test('switching tabs detaches without cancelling the persistent task', async () => {
+  const app = await environment(); let detached = 0; let cancelled = 0;
+  app.setAgentDetach(() => { detached++; }); app.setAgentCancel(() => { cancelled++; });
+  app.switchTab(20); app.emit('onActivated', { tabId: 20, windowId: 1 }); await flush();
+  assert.ok(detached >= 1); assert.equal(cancelled, 0); assert.equal(app.getData().context.tabId, 20);
 });
 
 

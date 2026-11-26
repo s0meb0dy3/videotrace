@@ -1,3 +1,4 @@
+import { AgentChat } from './agent-chat.js';
 import { getPerson } from './people.js';
 import { sentenceRanges } from './text.js';
 
@@ -56,11 +57,13 @@ export class TranscriptPanel {
     this.nav.setAttribute('aria-label', '侧栏工具栏');
     this.summaryTab = element('button', 'view-tab', '总结');
     this.transcriptTab = element('button', 'view-tab active', '转写');
+    this.agentTab = element('button', 'view-tab', 'Agent');
+    this.agentTab.onclick = () => this.setView('agent');
     this.summaryTab.onclick = () => this.setView('summary');
     this.transcriptTab.onclick = () => this.setView('transcript');
     this.partBadge = element('span', 'part-badge');
     this.partBadge.hidden = true;
-    this.nav.append(this.summaryTab, this.transcriptTab, this.partBadge);
+    this.nav.append(this.summaryTab, this.transcriptTab, this.agentTab, this.partBadge);
     const actions = element('div', 'toolbar-actions');
     this.nav.append(actions);
     this.analyzeButton = element('button', 'tool-button', '开始分析');
@@ -101,6 +104,7 @@ export class TranscriptPanel {
     this.body.setAttribute('aria-label', '逐字稿正文');
     this.transcript = element('div', 'transcript');
     this.summary = element('div', 'summary');
+    this.chat = new AgentChat({ analyze: handlers.analyze, send: handlers.ask, retry: handlers.reconnect, replay: handlers.replay });
     this.body.append(this.transcript, this.summary);
     this.summary.hidden = true;
     // 用户滚动才暂停跟随，程序滚动不影响。
@@ -126,7 +130,7 @@ export class TranscriptPanel {
       if (this.follow) this.scrollToActive();
     };
     actions.append(this.translationButton, this.followButton, this.analyzeButton, this.moreButton);
-    this.aside.append(this.nav, this.taskStatus, this.status, this.body, this.moreMenu);
+    this.aside.append(this.nav, this.taskStatus, this.status, this.body, this.chat.history, this.chat.notice, this.chat.form, this.moreMenu);
     root.append(this.aside);
     document.body.append(this.host);
     this.setView('transcript', { persist: false });
@@ -156,7 +160,7 @@ export class TranscriptPanel {
     this.translationButton.hidden = !transcriptTools;
     this.followButton.hidden = !transcriptTools;
     const hasResult = this.hasTranscript || this.hasSummary;
-    this.analyzeButton.hidden = !this.available || (hasResult && !this.busy);
+    this.analyzeButton.hidden = !this.available || (!this.busy && (hasResult || this.view === 'agent'));
     this.moreButton.hidden = !this.available || !hasResult || this.busy;
     if (this.moreButton.hidden) this.closeMore();
   }
@@ -185,6 +189,7 @@ export class TranscriptPanel {
     this.closeMore();
     this.partBadge.hidden = true;
     this.menuTitle.textContent = '';
+    this.chat.clear();
     this.transcript.replaceChildren();
     this.hasSummary = false;
     this.hasTranscript = false;
@@ -298,19 +303,20 @@ export class TranscriptPanel {
   }
 
   setView(view, { persist = true } = {}) {
-    const summary = view === 'summary';
     if (persist && this.view === view) return;
     if (persist && this.view === 'transcript') this.readingAnchor = this.getAnchor();
     this.view = view;
-    this.summary.hidden = !summary;
-    this.transcript.hidden = summary;
+    this.summary.hidden = view !== 'summary';
+    this.transcript.hidden = view !== 'transcript';
+    this.body.hidden = view === 'agent';
+    this.chat.setVisible(view === 'agent');
     this.updateToolbar();
     this.body.scrollTop = 0;
-    if (persist && !summary) this.scrollToAnchor(this.readingAnchor);
-    this.summaryTab.classList.toggle('active', summary);
-    this.transcriptTab.classList.toggle('active', !summary);
-    this.summaryTab.setAttribute('aria-pressed', String(summary));
-    this.transcriptTab.setAttribute('aria-pressed', String(!summary));
+    if (persist && view === 'transcript') this.scrollToAnchor(this.readingAnchor);
+    for (const [name, tab] of Object.entries({ summary: this.summaryTab, transcript: this.transcriptTab, agent: this.agentTab })) {
+      tab.classList.toggle('active', name === view);
+      tab.setAttribute('aria-pressed', String(name === view));
+    }
     if (persist) this.handlers.state?.();
   }
 

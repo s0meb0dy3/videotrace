@@ -65,21 +65,3 @@ export function validateResult(result: any, { speakerIds }: Pick<PreparedDocumen
   if (new Set(candidates).size !== candidates.length) throw new Error('同一个头像候选不能分配给多个说话人');
   return result.faces === undefined ? { speakers, summary } : { speakers, summary, faces: result.faces };
 }
-
-export function resultSchema({ speakerIds }: Pick<PreparedDocument, 'speakerIds'>): Record<string, unknown> {
-  const label = { type: 'string', minLength: 1 };
-  return {
-    type: 'object', additionalProperties: false, required: ['speakers', 'summary'],
-    properties: {
-      speakers: {
-        type: 'object', additionalProperties: false, required: speakerIds,
-        properties: Object.fromEntries(speakerIds.map(id => [id, label])),
-      },
-      summary: label,
-      faces: {
-        type: 'object', additionalProperties: false,
-        properties: Object.fromEntries(speakerIds.map(id => [id, { anyOf: [{ type: 'string', minLength: 1 }, { type: 'null' }] }])),
-      },
-    },
-  };
-}

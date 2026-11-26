@@ -8,6 +8,7 @@ export interface FaceFrame {
 }
 export interface FaceBroker {
   candidates: Set<string>;
+  sources: Map<string, { image: string; box: number[] }>;
   inspect(range: { startMs: number; endMs: number }): Promise<unknown>;
   receive(requestId: string, frames: unknown): boolean;
 }
@@ -21,8 +22,9 @@ interface PendingCapture {
 export function createFaceBroker(publish: (data: unknown) => void | Promise<unknown>, signal: AbortSignal, timeoutMs = 90_000): FaceBroker {
   let pending: PendingCapture | undefined;
   const candidates = new Set<string>();
+  const sources: FaceBroker['sources'] = new Map();
   return {
-    candidates,
+    candidates, sources,
     async inspect({ startMs, endMs }) {
       const range = { startMs, endMs };
       const times = Array.from({ length: Math.ceil((endMs - startMs) / 1000) }, (_, i) => startMs + i * 1000);
@@ -47,7 +49,10 @@ export function createFaceBroker(publish: (data: unknown) => void | Promise<unkn
       for (const [index, frame] of frames.entries()) {
         const faces = frame.faces.map((face, faceIndex) => {
           const candidateId = `${requestId}-${index}-${faceIndex}`;
-          if (frame.image) candidates.add(candidateId);
+          if (frame.image) {
+            candidates.add(candidateId);
+            sources.set(candidateId, { image: frame.image, box: face.box });
+          }
           return { box: face.box, score: face.score, ...(frame.image ? { candidateId } : {}) };
         });
         detections.push({ timeMs: frame.timeMs, faces });

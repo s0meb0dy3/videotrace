@@ -26,6 +26,66 @@ async function complete(request, id) {
   return { task, text };
 }
 
+test('视频会话保留渐进更新，重启后继续追问且不重新转写', async t => {
+  const video = { ...document, context: { key: 'BVtest:part1', title: '测试访谈' } };
+  const app = await setup(t, { runner: async ({ onSpeakerUpdate, onSummaryUpdate, onEvent }) => {
+    await onEvent({ type: 'agent_start' });
+    await onEvent({ type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'update_speaker', args: { speakerId: '0', label: '主持人' } });
+    await onSpeakerUpdate({ speakerId: '0', label: '主持人' });
+    await onEvent({ type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'update_speaker', result: { content: [{ type: 'text', text: '{"accepted":true}' }] }, isError: false, durationMs: 18 });
+    await onSummaryUpdate('首次摘要');
+    await onEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '流式片段' } });
+    await onEvent({ type: 'message_end', message: { role: 'assistant', model: 'test-model', stopReason: 'stop',
+      content: [{ type: 'thinking', thinking: '角色有自我介绍' }, { type: 'text', text: '这是一次访谈' }], usage: { totalTokens: 99 } } });
+    await onEvent({ type: 'agent_end' });
+    return { speakers: { '0': '主持人' }, summary: '首次摘要' };
+  } });
+  const post = (app, body) => app.request('/tasks', { method: 'POST', body: JSON.stringify(body) });
+  const initial = await post(app, { document: video, mode: 'analyze' });
+  assert.equal(initial.status, 202);
+  const { id } = await initial.json();
+  const first = await complete(app.request, id);
+  assert.equal(first.task.status, 'completed');
+  assert.match(first.text, /transcript_ready[\s\S]*speaker_updated[\s\S]*summary_updated/);
+  const resumed = await setup(t, { root: app.root, asrRunner: () => assert.fail('追问不可重新转写'),
+    runner: async ({ document, conversation, prompt, onSummaryUpdate }) => {
+      assert.deepEqual(document.cues, video.cues);
+      assert.equal(conversation.result.speakers['0'], '主持人');
+      assert.equal(conversation.history.at(-1).content, '首次摘要');
+      assert.equal(prompt, '补充要点');
+      await onSummaryUpdate('更新后的摘要');
+      return { ...conversation.result, summary: '更新后的摘要', answer: '已补充' };
+    } });
+  const session = async () => (await resumed.request('/session?key=BVtest%3Apart1')).json();
+  assert.deepEqual((await session()).tasks.map(task => task.id), [id]);
+  const followup = await post(resumed, { previousTaskId: id, prompt: '补充要点' });
+  assert.equal(followup.status, 202);
+  const second = await complete(resumed.request, (await followup.json()).id);
+  assert.equal(second.task.status, 'completed');
+  assert.equal(second.task.answer, '已补充');
+  assert.equal(second.task.speakerState.summary, '更新后的摘要');
+  assert.equal((await session()).tasks.length, 2);
+  assert.equal((await post(resumed, { previousTaskId: id, prompt: '重复提交' })).status, 409);
+  const traceDir = join(app.root, '.private/agent/traces');
+  const files = await readdir(traceDir);
+  assert.equal(files.length, 1);
+  const path = join(traceDir, files[0]);
+  const raw = await readFile(path, 'utf8');
+  const entries = raw.trim().split('\n').map(JSON.parse);
+  assert.deepEqual(entries.filter(e => e.role === 'user').map(e => [e.turn, e.text]), [[1, '推断发言人并概括视频。'], [2, '补充要点']]);
+  assert.deepEqual(entries.filter(e => e.status === 'completed').map(e => e.turn), [1, 2]);
+  const tool = entries.find(e => e.type === 'tool_result');
+  assert.deepEqual(tool.args, { speakerId: '0', label: '主持人' });
+  assert.deepEqual(tool.result, { accepted: true });
+  assert.equal(tool.durationMs, 18);
+  const reply = entries.find(e => e.role === 'assistant');
+  assert.equal(reply.text, '这是一次访谈');
+  assert.equal(reply.thinking, '角色有自我介绍');
+  assert.equal(reply.usage.totalTokens, 99);
+  assert.doesNotMatch(raw, /原始句子|provider-secret|流式片段/);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
 test('avatar capture is task-scoped, returns candidates, and does not persist JPEGs', async t => {
   const app = await setup(t, { runner: async ({ inspectFaces }) => {
     const scan = await inspectFaces({ startMs: 2000, endMs: 4000 });
@@ -108,6 +168,10 @@ test('cancel and timeout are terminal even if runner returns late', async t => {
     release(); await new Promise(resolve => setImmediate(resolve));
     const final = await (await app.request(`/tasks/${id}`)).json();
     assert.equal(final.status, status); assert.equal(final.result, undefined);
+    const trace = await readFile(join(app.root, `.private/agent/traces/${id}.jsonl`), 'utf8');
+    const entries = trace.trim().split('\n').map(JSON.parse);
+    assert.equal(entries.at(-1).status, status);
+    assert.ok(entries.every(entry => entry.turn === 1));
   }
 });
 

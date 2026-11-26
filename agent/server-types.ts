@@ -24,8 +24,6 @@ export interface CreateServerOptions {
   timeoutMs?: number;
   asrTimeoutMs?: number;
   maxAudioBytes?: number;
-  maxTurns?: number;
-  maxToolCalls?: number;
   translationFetch?: typeof fetch;
   translationTimeoutMs?: number;
   maxTasks?: number;

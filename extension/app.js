@@ -6,6 +6,7 @@ import { createFaceCapture, cropFaceImage } from './face-capture.js';
 import { initialAvatar } from './avatar.js';
 import { createAgentClient } from './agent-client.js';
 import { createAgentView } from './agent-view.js';
+import { paragraphize } from './transcript.js';
 
 const request = createTabBridge();
 let context = null;
@@ -22,6 +23,8 @@ let readingTimer;
 let savedReading;
 let translations;
 let translationJob;
+let agentError = '';
+let restoring = false;
 const resultKey = ctx => `asr-document:v1:${ctx.key}`;
 const avatarKey = ctx => `asr-avatars:v1:${ctx.key}`;
 const panelStateKey = ctx => `asr-panel-state:v1:${ctx.key}`;
@@ -29,12 +32,13 @@ const translationKey = ctx => `asr-translation:zh-CN:v1:${ctx.key}`;
 
 function saveReading() {
   clearTimeout(readingTimer);
-  if (!documentData) return;
+  const target = context || documentData?.context;
+  if (!target) return;
   const state = panel.getState();
   const serialized = JSON.stringify(state);
   if (serialized === savedReading) return;
   savedReading = serialized;
-  void writeStored(panelStateKey(documentData.context), state).catch(() => {});
+  void writeStored(panelStateKey(target), state).catch(() => {});
 }
 
 function cancel(message = '') {
@@ -49,7 +53,9 @@ function clear() {
   translationJob = undefined;
   translations = undefined;
   savedReading = undefined;
-  agentView.cancel();
+  agentView.detach();
+  restoring = false;
+  agentError = '';
   cancel();
   revision++;
   documentData = null;
@@ -97,18 +103,18 @@ async function load() {
   const target = context;
   panel.setStatus('正在读取本地转写…');
   try {
-    const cached = await readStored(resultKey(target));
+    const [cached, state] = await Promise.all([readStored(resultKey(target)), readStored(panelStateKey(target))]);
     if (token !== revision || task || documentData !== original) return;
+    savedReading = JSON.stringify(state);
     if (cached) {
-      const [avatars, state, translated] = await Promise.all([
-        readStored(avatarKey(target)), readStored(panelStateKey(target)), readStored(translationKey(target))
-      ]);
+      const [avatars, translated] = await Promise.all([readStored(avatarKey(target)), readStored(translationKey(target))]);
       if (token !== revision || task || documentData !== original) return;
       translations = translated?.savedAt === cached.savedAt ? translated?.translations : undefined;
-      savedReading = JSON.stringify(state);
       present({ ...cached, context: target, avatars: avatars || {} }, state && { ...state, manualReading: true });
+    } else {
+      panel.setStatus('');
+      if (state) panel.restoreState(state);
     }
-    else panel.setStatus('');
   } catch {
     if (token === revision) panel.setStatus('本地结果读取失败，请重试', { error: true, retry: true });
   }
@@ -116,27 +122,18 @@ async function load() {
 
 const panel = new TranscriptPanel(chrome.runtime.getURL('panel.css'), {
   refresh: () => context ? load() : syncContext(),
-  analyze: async () => {
-    if (!context || task) return;
-    const target = context;
-    const active = task = new AbortController();
-    panel.setTaskState({ busy: true, message: '正在准备…' });
-    let error;
-    try {
-      const metadata = await request('identityMetadata', { tabId: target.tabId, key: target.key }).catch(() => null);
-      if (active.signal.aborted) return;
-      context = { ...target, ...metadata };
-      const inspectFaces = await readStored('speakerAvatars').catch(() => false);
-      if (!active.signal.aborted) await agentView.analyze({ inspectFaces: inspectFaces === true });
-    } catch (failure) { error = failure; }
-    finally {
-      if (task === active) {
-        task = null;
-        panel.setTaskState({ message: error?.message, error: Boolean(error) });
-      }
-    }
+  analyze: () => analyze(),
+  ask: prompt => analyze(prompt),
+  reconnect: () => restoreSession(),
+  replay: id => agentView.replay(id),
+  cancelTask: () => {
+    cancel();
+    const token = revision;
+    void agentView.cancel().catch(error => {
+      if (token !== revision) return;
+      panel.setTaskState({ message: error.message, error: true });
+    }).finally(updateChat);
   },
-  cancelTask: () => { agentView.cancel(); cancel(); },
   seek: async (milliseconds, { play = false } = {}) => {
     if (!context) return;
     const token = revision;
@@ -163,11 +160,11 @@ const panel = new TranscriptPanel(chrome.runtime.getURL('panel.css'), {
     try {
       const cues = target.cues.filter(({ text }) => text.trim()).map(({ id, text }) => ({ id, text }));
       const output = await createAgentClient().translate(cues, job.signal);
-      if (job.signal.aborted || documentData !== target) return;
+      if (job.signal.aborted || documentData?.savedAt !== target.savedAt) return;
       translationJob = undefined;
       translations = output.translations;
       void writeStored(translationKey(target.context), { savedAt: target.savedAt, translations }).catch(() => {});
-      present(target, { ...panel.getState(), bilingual: true });
+      present(documentData, { ...panel.getState(), bilingual: true });
       saveReading();
     } catch {
       if (!job.signal.aborted && documentData === target) panel.setTranslationStatus(false, '翻译失败，点击重试');
@@ -187,24 +184,90 @@ const agentView = createAgentView({
     captureFrames: (times, signal) => request('framesAt', { tabId: target.tabId, key: target.key, times }, signal)
   })(times, signal),
   cropFace: (...args) => cropFaceImage(...args),
-  onProgress: message => panel.setTaskState({ busy: true, message }),
+  onProgress: (message, { error = false } = {}) => {
+    panel.setTaskState({ busy: Boolean(message) && !error, message, error });
+    updateChat();
+  },
+  onTasks: tasks => panel.chat.setTasks(tasks),
+  onEvent: (id, event) => panel.chat.addEvent(id, event),
+  onSessionError: message => { agentError = message; updateChat(); },
   onResult: async (result, original, signal, avatars = {}) => {
-    const people = Object.fromEntries(Object.entries(result.speakers).map(([id, name]) => [id, { id, name, inferred: true }]));
-    const updated = { ...original, savedAt: original.savedAt ?? Date.now(), people, agentResult: result, avatars };
-    if (translations && original.savedAt === undefined) {
-      await writeStored(translationKey(original.context), { savedAt: updated.savedAt, translations }).catch(() => {});
-    }
-    await writeStored(resultKey(original.context), updated);
-    await writeStored(avatarKey(original.context), avatars);
-    if (task && !signal?.aborted) {
-      const state = documentData ? panel.getState() : undefined;
-      if (!documentData) translations = undefined;
+    const current = documentData;
+    const sameTranscript = current?.cues === original.cues || (
+      current?.cues.length === original.cues.length && current.cues.every((cue, i) => {
+        const next = original.cues[i];
+        return cue.id === next.id && cue.text === next.text && cue.speakerId === next.speakerId && cue.startMs === next.startMs && cue.endMs === next.endMs;
+      })
+    );
+    const people = Object.fromEntries(original.cues.map(({ speakerId: id }) => {
+      const name = result?.speakers?.[id];
+      return [id, { id, name, inferred: Boolean(name) }];
+    }));
+    const updated = {
+      ...(sameTranscript ? current : original), context, cues: original.cues,
+      paragraphs: (sameTranscript ? current.paragraphs : original.paragraphs) || paragraphize(original.cues),
+      savedAt: sameTranscript ? current.savedAt : (original.savedAt ?? Date.now()),
+      people, agentResult: result, avatars
+    };
+    const state = { ...panel.getState(), bilingual: sameTranscript && panel.bilingual };
+    if (!sameTranscript) {
+      translations = undefined;
       translationJob?.abort();
       translationJob = undefined;
-      present(updated, state);
     }
+    signal.throwIfAborted();
+    present(updated, state);
+    await Promise.all([
+      writeStored(resultKey(updated.context), { ...updated, avatars: undefined }),
+      writeStored(avatarKey(updated.context), avatars)
+    ]).catch(() => {});
   }
 });
+
+function updateChat() {
+  panel.chat.setState({ available: Boolean(context), ready: agentView.ready, busy: Boolean(task || restoring || agentView.busy), error: agentError });
+}
+
+async function restoreSession() {
+  if (!context || task || restoring) return;
+  const token = revision;
+  restoring = true;
+  updateChat();
+  await agentView.restore(context);
+  if (token !== revision) return;
+  restoring = false;
+  updateChat();
+}
+
+async function analyze(prompt) {
+  if (!context || task || restoring || agentView.busy || (prompt && !agentView.ready)) return false;
+  const target = context;
+  const active = task = new AbortController();
+  panel.setTaskState({ busy: true, message: '正在准备…' });
+  updateChat();
+  let error;
+  try {
+    const metadata = await request('identityMetadata', { tabId: target.tabId, key: target.key }).catch(() => null);
+    if (active.signal.aborted) return false;
+    context = { ...target, ...metadata };
+    const inspectFaces = await readStored('speakerAvatars').catch(() => false);
+    if (active.signal.aborted) return false;
+    agentError = '';
+    await agentView.analyze({ inspectFaces: inspectFaces === true, prompt });
+    return true;
+  } catch (failure) {
+    error = failure;
+    return false;
+  } finally {
+    if (task === active) {
+      task = null;
+      if (error) panel.setTaskState({ message: error.message, error: true });
+      else panel.setBusy(false);
+      updateChat();
+    }
+  }
+}
+
 readStored('settings').then(settings => { if (settings) panel.setFollow(settings.follow, false); }).catch(() => {});
 
 async function updatePlayback() {
@@ -228,17 +291,19 @@ async function syncContext() {
     windowId = snapshot.windowId; tabId = snapshot.tabId;
     const nextRoute = `${snapshot.tabId}:${snapshot.context?.key || snapshot.url}`;
     panel.setAvailable(snapshot.available);
-    if (route !== nextRoute) { route = nextRoute; context = null; clear(); }
+    if (route !== nextRoute) { route = nextRoute; clear(); context = null; }
     if (!snapshot.available) { panel.setStatus('请在左侧打开 B站视频'); return; }
     if (!snapshot.context) { panel.setStatus('等待播放器就绪，请刷新视频页或重试', { retry: true }); return; }
     if (!context) {
       context = { ...snapshot.context, tabId: snapshot.tabId };
-      panel.setContext(context); load();
+      panel.setContext(context);
+      const current = revision;
+      void load().then(() => { if (current === revision) void restoreSession(); });
     }
   } catch (error) { if (token === revision) panel.setStatus(error.message, { error: true, retry: true }); }
   finally { checking = false; if (syncAgain) { syncAgain = false; syncContext(); } }
 }
-function invalidate() { context = null; route = ''; clear(); syncContext(); }
+function invalidate() { clear(); context = null; route = ''; syncContext(); }
 chrome.tabs.onActivated.addListener(info => { if (windowId === undefined || info.windowId === windowId) invalidate(); });
 chrome.tabs.onUpdated.addListener((id, change) => { if (id === tabId && (change.url || change.status === 'loading')) invalidate(); });
 chrome.tabs.onRemoved.addListener(id => { if (id === tabId) invalidate(); });
