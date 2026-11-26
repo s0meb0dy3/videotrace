@@ -14,6 +14,8 @@
 
 `AI_REASONING=false` 让 PI 不请求推理档位，不保证关闭服务端默认思考。项目不再自动发送厂商专用的思考和联网参数；原 `AI_PROVIDER`、`AI_WEB_SEARCH` 不再读取。主模型密钥请填写 `AI_API_KEY`；`BAILIAN_API_KEY` 仅用于转写。
 
+配置 `TAVILY_API_KEY`（项目根目录 `.env` 或进程环境）后，每轮默认向模型提供 `web_search`，无需额外开关；是否搜索由模型决定。工具只接收公开关键词，使用 Tavily 基础搜索，返回最多 5 条标题、链接、文字片段和相关性分数。查询和结果会进入本地会话轨迹，搜索失败不会自动重试。留空则不注册此工具。
+
 ## HTTP 接口
 
 所有业务请求必须带 `Authorization: Bearer <本机token>`。Host 必须精确匹配 loopback 主机及实际端口（127.0.0.1、localhost 或 [::1]），拒绝 DNS rebinding 域名。带 Origin 的请求仅接受标准 Chrome 扩展 origin（`chrome-extension://` 加32位 a-p 扩展ID）；普通网页 origin、null origin 均拒绝。扩展 CORS 预检不带 token，但仅放行预检，本身不能查询或修改任务。

@@ -26,6 +26,29 @@ async function complete(request, id) {
   return { task, text };
 }
 
+test('后端从 .env 启用搜索，不将密钥写入会话轨迹', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-agent-search-'));
+  const key = 'local-tavily-test-secret';
+  await writeFile(join(root, '.env'), `TAVILY_API_KEY="${key}"\n`, { mode: 0o600 });
+  const app = await setup(t, { root, runner: async ({ webSearch, onEvent }) => {
+    assert.equal(typeof webSearch, 'function');
+    await onEvent({ type: 'tool_execution_start', toolCallId: 'search', toolName: 'web_search', args: { query: '查找公开资料' } });
+    await onEvent({ type: 'tool_execution_end', toolCallId: 'search', toolName: 'web_search',
+      result: { content: [{ type: 'text', text: JSON.stringify({ results: [{ title: key, url: 'https://example.test' }] }) }] },
+      isError: false, durationMs: 11 });
+    return result;
+  } });
+  const { id } = await app.create();
+  const { task } = await complete(app.request, id);
+  assert.equal(task.status, 'completed');
+  const trace = await readFile(join(root, '.private/agent/traces', `${id}.jsonl`), 'utf8');
+  assert.ok(!trace.includes(key));
+  const search = trace.trim().split('\n').map(JSON.parse).find(event => event.toolName === 'web_search');
+  assert.deepEqual(search.args, { query: '查找公开资料' });
+  assert.equal(search.result.results[0].url, 'https://example.test');
+  assert.equal(search.durationMs, 11);
+});
+
 test('视频会话保留渐进更新，重启后继续追问且不重新转写', async t => {
   const video = { ...document, context: { key: 'BVtest:part1', title: '测试访谈' } };
   const app = await setup(t, { runner: async ({ onSpeakerUpdate, onSummaryUpdate, onEvent }) => {

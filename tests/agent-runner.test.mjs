@@ -21,6 +21,24 @@ const reply = text => fauxAssistantMessage([fauxText(text)]);
 const messageText = message => typeof message.content === 'string' ? message.content : message.content[0].text;
 const declaredTools = context => context.messages.flatMap(message => message.toolsAdded || []).map(tool => tool.name);
 
+test('配置后模型可调用搜索并读取结果；失败后仍能回复', async () => {
+  const script = runtime([call('web_search', { query: ' 360 创始人 ' }), call('web_search', { query: '另一个查询' }), reply('已查证。')]);
+  const results = [{ title: '创始人', url: 'https://example.test/', content: '公司介绍', score: 0.9 }];
+  const queries = [];
+  const output = await runPiTask({ document, runtime: script.runtime, webSearch: async query => {
+    queries.push(query);
+    if (queries.length > 1) throw new Error('联网搜索失败');
+    return results;
+  } });
+  assert.equal(output.answer, '已查证。');
+  assert.deepEqual(queries, ['360 创始人', '另一个查询']);
+  assert.ok(declaredTools(script.contexts[0]).includes('web_search'));
+  const calls = script.contexts.at(-1).messages.filter(message => message.role === 'toolResult');
+  assert.deepEqual(JSON.parse(messageText(calls[0])), { results });
+  assert.equal(calls[1].isError, true);
+  assert.ok(!createVideoTools(['0'], undefined, {}).tools.some(tool => tool.name === 'web_search'));
+});
+
 test('复用工具定义，但不同任务的说话人、截图与更新互不影响', async () => {
   const changes = [];
   const seeds = new Set();

@@ -9,6 +9,7 @@ export interface SpeakerPatch {
 
 export interface VideoToolOptions {
   inspectFaces?: (range: { startMs: number; endMs: number }, signal?: AbortSignal) => Promise<any>;
+  webSearch?: ReturnType<typeof import('./tavily-search.js').createTavilySearch>;
   shownCandidateIds?: Set<string> | string[];
   onSpeakerUpdate?: (patch: SpeakerPatch) => Promise<void>;
   onSummaryUpdate?: (summary: string) => Promise<void>;
@@ -17,7 +18,7 @@ export interface VideoToolOptions {
 const summaryParameters = { type: 'object', additionalProperties: false, required: ['summary'], properties: { summary: { type: 'string', minLength: 1 } } };
 
 type CandidateFrame = { image: string; faces: Array<{ candidateId: string }> };
-type ToolContext = Pick<VideoToolOptions, 'inspectFaces' | 'onSpeakerUpdate' | 'onSummaryUpdate'> & {
+type ToolContext = Pick<VideoToolOptions, 'inspectFaces' | 'webSearch' | 'onSpeakerUpdate' | 'onSummaryUpdate'> & {
   speakerIds: Set<string>;
   current: VideoResult;
   emptyFaces: Record<string, null>;
@@ -99,13 +100,24 @@ const toolDefinitions = [
       context.current = { ...context.current, summary };
       return content({ accepted: true });
     }
+  },
+  {
+    name: 'web_search', label: '联网搜索',
+    description: '搜索公开网页，返回标题、链接、文字片段和相关性分数。用于查证公开人物、机构或事实；只传必要的公开关键词，不发送完整转写或私密信息。判断时优先核对官方来源，并在回复中附上依据。',
+    parameters: { type: 'object', additionalProperties: false, required: ['query'],
+      properties: { query: { type: 'string', minLength: 1, maxLength: 400 } } },
+    execute: async ({ webSearch }, _id, { query }, signal) => {
+      const term = query.trim();
+      if (!term) throw new Error('搜索词不能为空');
+      return content({ results: await webSearch!(term, signal) });
+    }
   }
 ] satisfies Array<{ name: string; label: string; description: string; parameters: object;
   execute: (context: ToolContext, id: string, args: any, signal?: AbortSignal) => Promise<unknown> }>;
 
 /** 工具定义全局复用；每个用户回合只绑定自己的数据和回调。 */
 export function createVideoTools(speakerIds: string[], prior: VideoResult | undefined, {
-  inspectFaces, shownCandidateIds = [], onSpeakerUpdate, onSummaryUpdate
+  inspectFaces, webSearch, shownCandidateIds = [], onSpeakerUpdate, onSummaryUpdate
 }: VideoToolOptions) {
   // 用本段转写建立说话人初始状态；追问时继承已有标签、摘要和头像。
   const defaultSpeakers = Object.fromEntries(speakerIds.map(id => [id, '未知发言人']));
@@ -120,10 +132,10 @@ export function createVideoTools(speakerIds: string[], prior: VideoResult | unde
   const shown = new Set(shownCandidateIds);
   const context: ToolContext = {
     speakerIds: new Set(speakerIds), current, emptyFaces, pendingImages, inspectedRanges,
-    shown, inspectFaces, onSpeakerUpdate, onSummaryUpdate
+    shown, inspectFaces, webSearch, onSpeakerUpdate, onSummaryUpdate
   };
   // Pi 的工具接口接收本次调用参数；在这里把任务上下文绑定进去。
-  const tools = toolDefinitions.filter(tool => tool.name !== 'inspect_faces' || inspectFaces)
+  const tools = toolDefinitions.filter(tool => (tool.name !== 'inspect_faces' || inspectFaces) && (tool.name !== 'web_search' || webSearch))
     .map(({ execute, ...definition }) => ({
       ...definition,
       execute: (id: string, args: any, signal?: AbortSignal) => execute(context, id, args, signal)

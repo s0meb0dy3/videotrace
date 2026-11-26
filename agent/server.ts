@@ -12,6 +12,8 @@ import { loadBailianApiKey, transcribeAudioFile } from './asr-service.js';
 import { prepareDocument, validateResult } from './document.js';
 import { createFaceBroker } from './face-broker.js';
 import { loadModelConfig, runPiTask } from './runner.js';
+import { readEnv } from './env.js';
+import { createTavilySearch } from './tavily-search.js';
 import { translationBatches, translateBatches } from './translate.js';
 import { TaskStore } from './core/task-store.js';
 import { EventLog } from './core/event-log.js';
@@ -52,8 +54,10 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
   // 翻译仍使用独立的 DeepSeek 接口，不向它发送其他服务的密钥。
   const translationApiKey = modelConfig.baseUrl.replace(/\/$/, '') === 'https://api.deepseek.com' ? apiKey : undefined;
   bailianApiKey ??= await loadBailianApiKey(root);
+  const tavilyKey = (await readEnv(root))('TAVILY_API_KEY')?.trim();
+  const webSearch = tavilyKey ? createTavilySearch(tavilyKey) : undefined;
   const token = randomBytes(32).toString('hex');
-  const secrets = [apiKey, bailianApiKey, token];
+  const secrets = [apiKey, bailianApiKey, tavilyKey, token];
   const active = new Map();
   const queue = new InMemoryJobQueue(maxConcurrentTasks);
   const traces = new Map();
@@ -178,7 +182,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
             ...(previous.answer || previous.result?.summary ? [{ role: 'assistant', content: previous.answer ?? previous.result.summary }] : [])
           ]) : [];
         const result = await runner({
-          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, modelConfig, inspectFaces: broker?.inspect, trace: analysis,
+          document: structuredClone(task.document), prompt: task.prompt, signal: controller.signal, modelConfig, inspectFaces: broker?.inspect, webSearch, trace: analysis,
           ...(task.previousTaskId ? { conversation: { history, result: { ...state, summary: state.summary ?? '' } } } : {}),
           onSpeakerUpdate: async patch => {
             const safe = clean(patch, secrets);
