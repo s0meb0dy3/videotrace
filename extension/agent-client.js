@@ -32,8 +32,8 @@ export function createAgentClient({ token, fetchImpl = fetch } = {}) {
     followUp: async (previousTaskId, prompt, { signal, inspectFaces } = {}) =>
       (await request('/tasks', { method: 'POST', body: { previousTaskId, prompt, inspectFaces }, signal })).json(),
     session: async (key, signal) => (await request(`/session?key=${encodeURIComponent(key)}`, { signal })).json(),
-    submitFaces: async (id, requestId, frames, signal) =>
-      (await request(`/tasks/${encodeURIComponent(id)}/faces`, { method: 'POST', body: { requestId, frames }, signal })).json(),
+    submitFaces: async (id, requestId, frames, signal, { evidence, error } = {}) =>
+      (await request(`/tasks/${encodeURIComponent(id)}/faces`, { method: 'POST', body: { requestId, frames, evidence, error }, signal })).json(),
     uploadAudio: async (id, audio, signal) => {
       const auth = await ensureToken(signal);
       const response = await fetchImpl(`${BASE_URL}/tasks/${encodeURIComponent(id)}/audio`, {

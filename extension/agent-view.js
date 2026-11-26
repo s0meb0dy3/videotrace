@@ -53,16 +53,17 @@ export function createAgentView({ getDocument, loadAudio, releaseAudio, captureF
     const seen = new Set();
     let capturing;
     const refresh = async () => snapshot(await client.get(task.id, signal), original, signal);
-    async function capture({ requestId, times, deadline }) {
+    async function capture({ requestId, times, deadline, continuous }) {
       const remaining = deadline - Date.now();
       if (!captureFaces || seen.has(requestId) || remaining <= 0) return;
       seen.add(requestId);
       capturing?.abort();
       const current = capturing = new AbortController();
       const captureSignal = AbortSignal.any([signal, current.signal, AbortSignal.timeout(remaining)]);
-      let frames = [];
-      try { ({ frames } = await captureFaces(target, times, captureSignal)); } catch { /* 头像失败不影响文本分析 */ }
-      if (!captureSignal.aborted) await client.submitFaces(task.id, requestId, frames, captureSignal);
+      let result;
+      try { result = await captureFaces(target, times, captureSignal, { continuous }); }
+      catch { result = { frames: [], error: 'browser_error' }; }
+      if (!captureSignal.aborted) await client.submitFaces(task.id, requestId, result.frames, captureSignal, result);
     }
     try {
       await client.watch(task.id, async event => {

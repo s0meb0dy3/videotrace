@@ -75,7 +75,7 @@ test('inspect_faces attaches each image once without persisting it or approving 
   ]);
   let scans = 0;
   const events = []; const messages = [];
-  const output = await runPiTask({ document, runtime: visual.runtime, inspectFaces: async range => { scans++; return { range, detections: [], representativeFrames: [{ timeMs: 10, image: 'private-image-base64', faces: [{ box: [0.1, 0.1, 0.2, 0.3], candidateId: 'req-0-0' }] }] }; }, onEvent: event => events.push(event), onMessages: state => messages.push(state) });
+  const output = await runPiTask({ document, runtime: visual.runtime, inspectFaces: async range => { scans++; return { range, detections: [], representativeFrames: [{ timeMs: 10, image: 'private-source-base64', faces: [{ box: [0.1, 0.1, 0.2, 0.3], candidateId: 'req-0-0' }] }], visual: { images: ['private-annotated-base64', 'private-image-base64'], times: [10], tracks: [{ label: 'T1', timeMs: 10, candidateId: 'req-0-0' }] } }; }, onEvent: event => events.push(event), onMessages: state => messages.push(state) });
   assert.deepEqual(declaredTools(visual.contexts[0]), ['inspect_faces', 'update_speaker', 'update_summary']);
   assert.deepEqual(output.faces, { '0': 'req-0-0', '1': null });
   const faceResult = visual.contexts[1].messages.find(message => message.role === 'toolResult' && message.toolName === 'inspect_faces');

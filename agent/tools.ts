@@ -32,21 +32,30 @@ const content = (value: unknown) => ({ content: [{ type: 'text' as const, text: 
 // 名称、描述、参数和实现只定义一次，不持有任何具体任务的数据。
 const toolDefinitions = [
   {
-    name: 'inspect_faces', label: '检查画面人物', description: '检查当前视频的毫秒时间范围（最多20秒），每秒检测一次并均匀附上最多3张截图。候选只代表某帧中的脸，不证明此人在说话。',
+    name: 'inspect_faces', label: '检查画面人物', description: '连续检查当前视频的一小段发言（毫秒，最多3秒）。第一张是带编号的全图，第二张（如有）按编号分行、按时间分列展示相邻人脸。编号仅在本次检查有效；嘴部变化不是音画同步证据，不能确定发言人时不要绑定头像。',
     parameters: { type: 'object', additionalProperties: false, required: ['startMs', 'endMs'], properties: { startMs: { type: 'integer', minimum: 0 }, endMs: { type: 'integer', minimum: 0 } } },
     execute: async ({ inspectFaces, inspectedRanges, pendingImages }, id, range, toolSignal) => {
-      if (range.endMs <= range.startMs || range.endMs - range.startMs > 20_000 || !Number.isSafeInteger(range.endMs)) throw new Error('采帧区间必须为正且不超过20秒');
+      if (range.endMs <= range.startMs || range.endMs - range.startMs > 3_000 || !Number.isSafeInteger(range.endMs)) throw new Error('采帧区间必须为正且不超过3秒');
       // 本轮相同区间成功检查后不再重复采帧；unavailable 不计入。
       const key = `${range.startMs}:${range.endMs}`;
       if (inspectedRanges.has(key)) return { ...content({ status: 'already_checked', range }), details: { status: 'already_checked' } };
       const response = await inspectFaces!({ startMs: range.startMs, endMs: range.endMs }, toolSignal);
-      if (response?.status === 'unavailable') return { ...content({ status: 'unavailable', range }), details: { status: 'unavailable' } };
+      if (response?.status === 'unavailable') {
+        const details = { status: 'unavailable', reason: response.reason };
+        return { ...content({ ...details, range }), details };
+      }
       inspectedRanges.add(key);
       const frames = (response.representativeFrames || []).filter(frame => frame.image).slice(0, 3);
-      pendingImages.set(id, frames);
-      // 事件和消息只保留时间点、人脸框等数据，不带图片正文。
-      const safe = { range: response.range || range, detections: response.detections || [], representativeFrames: frames.map(({ image, ...frame }) => frame) };
-      return { ...content(safe), details: { range: safe.range, detectionCount: safe.detections.length, frameCount: frames.length } };
+      const { images = [], ...visual } = response.visual ?? {};
+      // 证据图只发给模型；原帧仍用于头像裁剪。事件只记录元数据。
+      const attachments = images.length ? images.map((image, index) => ({ image,
+        faces: index === 0 ? frames.flatMap(frame => frame.faces) : [] })) : frames;
+      pendingImages.set(id, attachments);
+      const safe = { range: response.range || range, detections: response.detections || [],
+        representativeFrames: frames.map(({ image, ...frame }) => frame),
+        ...(images.length ? { visual: { ...visual, imageOrder: images.length === 2 ? ['annotated_frame', 'face_timeline'] : ['annotated_frame'] } } : {}) };
+      return { ...content(safe), details: { range: safe.range, detectionCount: safe.detections.length,
+        frameCount: attachments.length, visualStatus: visual.status } };
     }
   },
   {

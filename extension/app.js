@@ -180,9 +180,9 @@ const agentView = createAgentView({
   getDocument: () => documentData ? { ...documentData, context } : { context },
   loadAudio: (target, signal) => loadPageAudio({ request, context: target, signal }),
   releaseAudio,
-  captureFaces: (target, times, signal) => createFaceCapture({
-    captureFrames: (times, signal) => request('framesAt', { tabId: target.tabId, key: target.key, times }, signal)
-  })(times, signal),
+  captureFaces: (target, times, signal, options) => createFaceCapture({
+    captureFrames: (times, signal, { continuous } = {}) => request('framesAt', { tabId: target.tabId, key: target.key, times, continuous }, signal)
+  })(times, signal, options),
   cropFace: (...args) => cropFaceImage(...args),
   onProgress: (message, { error = false } = {}) => {
     panel.setTaskState({ busy: Boolean(message) && !error, message, error });

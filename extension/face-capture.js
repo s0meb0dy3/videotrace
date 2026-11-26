@@ -1,5 +1,6 @@
-// 在侧栏本地检测人脸；只有均匀选出的少量画面会随检测结果返回。
-const JPEG_PREFIX = 'data:image/jpeg;base64,';
+import { buildFaceEvidence, emptyEvidence, JPEG_PREFIX } from './face-evidence.js';
+
+// 在侧栏本地检测人脸；只返回少量候选画面。
 const CAPTURE_BATCH_SIZE = 12;
 const vendorPath = file => new URL(`./vendor/mediapipe/${file}`, import.meta.url).href;
 let detectorPromise;
@@ -43,15 +44,16 @@ function normalizeFaces(detections, { width, height }) {
 }
 
 export function createFaceCapture({ captureFrames, getDetector = loadDetector, decode = decodeJpeg }) {
-  return async (times, signal) => {
+  return async (times, signal, options) => {
     signal?.throwIfAborted();
+    const continuous = options?.continuous === true;
     const samples = [...new Set(times.filter(time => Number.isFinite(time) && time >= 0))].sort((a, b) => a - b);
-    if (!samples.length) return { frames: [] };
+    if (!samples.length) return continuous ? { frames: [], evidence: emptyEvidence() } : { frames: [] };
     const detector = await getDetector();
     const captured = new Map();
     for (let i = 0; i < samples.length; i += CAPTURE_BATCH_SIZE) {
       signal?.throwIfAborted();
-      const batch = await captureFrames(samples.slice(i, i + CAPTURE_BATCH_SIZE), signal);
+      const batch = await captureFrames(samples.slice(i, i + CAPTURE_BATCH_SIZE), signal, options);
       signal?.throwIfAborted();
       for (const { timeMs, dataUrl } of batch) {
         if (!Number.isFinite(timeMs) || timeMs < 0 || !dataUrl?.startsWith(JPEG_PREFIX) || captured.has(timeMs)) continue;
@@ -62,6 +64,15 @@ export function createFaceCapture({ captureFrames, getDetector = loadDetector, d
       }
     }
     const ordered = [...captured.values()].sort((a, b) => a.timeMs - b.timeMs);
+    if (continuous) {
+      const { primary, sourceImage, evidence } = await buildFaceEvidence(ordered, decode, signal);
+      return {
+        frames: ordered.map(frame => ({
+          timeMs: frame.timeMs, faces: frame.faces, ...(frame === primary && sourceImage ? { image: sourceImage } : {})
+        })),
+        evidence
+      };
+    }
     const withFaces = ordered.filter(frame => frame.faces.length);
     const selected = new Set(withFaces.length <= 3
       ? withFaces

@@ -27,6 +27,56 @@
     });
   }
 
+  function frameDataUrl(video, canvas, drawing) {
+    canvas.width = Math.min(video.videoWidth, 1280);
+    canvas.height = Math.round(video.videoHeight * canvas.width / video.videoWidth);
+    while (true) {
+      drawing.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      if (dataUrl.length <= 280_000) return dataUrl;
+      canvas.width = Math.max(1, Math.floor(canvas.width * 0.75));
+      canvas.height = Math.max(1, Math.floor(canvas.height * 0.75));
+    }
+  }
+
+  function samplePlayback(video, times, key, signal, sample) {
+    return new Promise((resolve, reject) => {
+      let index = 0;
+      let callback;
+      const cleanup = () => {
+        clearTimeout(timer);
+        video.cancelVideoFrameCallback(callback);
+        video.removeEventListener('ended', done);
+        signal.removeEventListener('abort', aborted);
+      };
+      const done = () => { cleanup(); resolve(); };
+      const failed = error => { cleanup(); reject(error); };
+      const aborted = () => failed(signal.reason);
+      // 给播放及缓冲留出余量，且在消息通道超时前停止采集。
+      const durationMs = (times.at(-1) - times[0]) / video.playbackRate;
+      const timer = setTimeout(() => failed(new Error('视频连续截帧超时，请稍后重试')),
+        Math.min(160000, 10000 + durationMs));
+      const onFrame = (_now, { mediaTime }) => {
+        try {
+          assertCurrent(key);
+          const timeMs = mediaTime * 1000;
+          // 掉帧时只记录一次实际画面，不为经过的每个目标重复编码。
+          const start = index;
+          while (index < times.length && times[index] <= timeMs) index++;
+          if (index > start && timeMs - times[index - 1] <= 500) sample(Math.round(timeMs));
+          if (index === times.length) done();
+          else callback = video.requestVideoFrameCallback(onFrame);
+        } catch (error) {
+          failed(error);
+        }
+      };
+      signal.addEventListener('abort', aborted, { once: true });
+      video.addEventListener('ended', done, { once: true });
+      callback = video.requestVideoFrameCallback(onFrame);
+      video.play().catch(failed);
+    });
+  }
+
   function context() {
     const bvid = location.pathname.match(/\/video\/(BV[\w]+)/)?.[1];
     if (!bvid) return null;
@@ -79,38 +129,47 @@
           if (!video?.videoWidth || !Number.isFinite(video.duration)) throw new Error('播放器尚未就绪，请稍后重试');
           if (frameCapture) throw new Error('播放器正在截取画面，请稍后重试');
           const times = (payload.times || []).filter(value => Number.isFinite(value) && value >= 0).slice(0, 40);
-          const resume = { time: video.currentTime, paused: video.paused };
+          const continuous = payload.continuous === true;
+          const resume = { time: video.currentTime, paused: video.paused, muted: video.muted };
           const controller = new AbortController();
           const { signal } = controller;
           const canvas = document.createElement('canvas');
           const drawing = canvas.getContext('2d');
           const frames = [];
+          const sample = timeMs => frames.push({ timeMs, dataUrl: frameDataUrl(video, canvas, drawing) });
+          const lastSeekTime = Math.max(0, video.duration - 0.05);
           frameCapture = { id: payload.captureId, controller };
           try {
             video.pause();
-            for (const timeMs of times) {
-              signal.throwIfAborted();
-              assertCurrent(payload.key);
-              const seconds = Math.min(timeMs / 1000, Math.max(0, video.duration - 0.05));
-              await seekFrame(video, seconds, signal);
-              signal.throwIfAborted();
-              assertCurrent(payload.key);
-              const actualTimeMs = Math.round(video.currentTime * 1000);
-              if (Math.abs(actualTimeMs - timeMs) > 500) continue;
-              canvas.width = Math.min(video.videoWidth, 1280);
-              canvas.height = Math.round(video.videoHeight * canvas.width / video.videoWidth);
-              let dataUrl;
-              do {
-                drawing.drawImage(video, 0, 0, canvas.width, canvas.height);
-                dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-                if (dataUrl.length <= 280_000) break;
-                canvas.width = Math.max(1, Math.floor(canvas.width * 0.75));
-                canvas.height = Math.max(1, Math.floor(canvas.height * 0.75));
-              } while (true);
-              frames.push({ timeMs: actualTimeMs, dataUrl });
+            if (continuous) {
+              const targets = times.filter(timeMs => timeMs <= video.duration * 1000)
+                .map(timeMs => Math.min(timeMs, lastSeekTime * 1000)).sort((a, b) => a - b);
+              if (targets.length) {
+                video.muted = true;
+                await seekFrame(video, targets[0] / 1000, signal);
+                signal.throwIfAborted();
+                assertCurrent(payload.key);
+                await samplePlayback(video, targets, payload.key, signal, sample);
+                signal.throwIfAborted();
+                assertCurrent(payload.key);
+              }
+            } else {
+              for (const timeMs of times) {
+                signal.throwIfAborted();
+                assertCurrent(payload.key);
+                await seekFrame(video, Math.min(timeMs / 1000, lastSeekTime), signal);
+                signal.throwIfAborted();
+                assertCurrent(payload.key);
+                const actualTimeMs = Math.round(video.currentTime * 1000);
+                if (Math.abs(actualTimeMs - timeMs) <= 500) sample(actualTimeMs);
+              }
             }
           } finally {
             frameCapture = null;
+            if (continuous) {
+              video.pause();
+              video.muted = resume.muted;
+            }
             if (context()?.key === payload.key) {
               video.currentTime = resume.time;
               if (!resume.paused) video.play().catch(() => {});

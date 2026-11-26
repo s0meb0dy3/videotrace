@@ -127,7 +127,7 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
     const controller = new AbortController();
     const trace = traces.get(task.id);
     active.set(task.id, controller);
-    const broker = task.inspectFaces ? createFaceBroker(data => publish(task.id, 'capture_faces', data), controller.signal, keyOf(task) ? 3_000 : undefined) : undefined;
+    const broker = task.inspectFaces ? createFaceBroker(data => publish(task.id, 'capture_faces', data), controller.signal) : undefined;
     if (broker) faceBrokers.set(task.id, broker);
     let timer;
     const startTimer = (ms, message) => {
@@ -346,8 +346,8 @@ export async function createServer({ root = process.cwd(), port = 43127, runner 
         const broker = faceBrokers.get(task.id);
         if (!broker || task.status !== 'analyzing') return json(response, 409, { error: '采帧请求已结束' });
         try {
-          const { requestId, frames } = JSON.parse((await readRequestBody(request, 1024 ** 2)).toString('utf8'));
-          const accepted = broker.receive(requestId, frames);
+          const { requestId, frames, evidence, error } = JSON.parse((await readRequestBody(request, 1024 ** 2)).toString('utf8'));
+          const accepted = broker.receive(requestId, frames, evidence, error);
           return json(response, accepted ? 200 : 409, { accepted });
         } catch { return json(response, 400, { error: '无效采帧结果' }); }
       }

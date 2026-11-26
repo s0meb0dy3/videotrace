@@ -90,7 +90,10 @@ test('avatar capture is task-scoped, returns candidates, and does not persist JP
   const app = await setup(t, { runner: async ({ inspectFaces }) => {
     const scan = await inspectFaces({ startMs: 2000, endMs: 4000 });
     assert.equal(scan.representativeFrames.length, 1);
-    return { ...result, faces: { '0': scan.representativeFrames[0].faces[0].candidateId } };
+    const candidateId = scan.representativeFrames[0].faces[0].candidateId;
+    assert.deepEqual(scan.visual.tracks, [{ label: 'T1', timeMs: 2000, candidateId }]);
+    assert.equal(scan.visual.images.length, 2);
+    return { ...result, faces: { '0': candidateId } };
   } });
   const { id } = await (await app.request('/tasks', { method: 'POST', body: JSON.stringify({ document, mode: 'analyze', inspectFaces: true }) })).json();
   const response = await app.request(`/tasks/${id}/events`);
@@ -103,10 +106,14 @@ test('avatar capture is task-scoped, returns candidates, and does not persist JP
     text += decoder.decode(value, { stream: true });
     event = text.split('\n\n').filter(block => block.includes('event: capture_faces')).map(block => block.match(/\ndata: (.+)/)?.[1]).find(Boolean);
   }
-  const { requestId, times } = JSON.parse(event).data;
-  assert.deepEqual(times, [2000, 3000]);
+  const { requestId, times, continuous } = JSON.parse(event).data;
+  assert.equal(continuous, true);
+  assert.deepEqual(times, [2000, 2250, 2500, 2750, 3000, 3250, 3500, 3750]);
   const image = '/9j/QVZBVEFS';
-  const submit = requestId => app.request(`/tasks/${id}/faces`, { method: 'POST', body: JSON.stringify({ requestId, frames: [{ timeMs: 2000, image, faces: [{ box: [0.1, 0.2, 0.3, 0.4], score: 0.95 }] }] }) });
+  const submit = requestId => app.request(`/tasks/${id}/faces`, { method: 'POST', body: JSON.stringify({ requestId,
+    frames: [{ timeMs: 2000, image, faces: [{ box: [0.1, 0.2, 0.3, 0.4], score: 0.95 }] }],
+    evidence: { status: 'stable_tracks', images: [image, image], times: [2000], tracks: [{ label: 'T1', timeMs: 2000, faceIndex: 0 }] }
+  }) });
   assert.equal((await submit('stale')).status, 409);
   assert.equal((await submit(requestId)).status, 200);
   const { task } = await complete(app.request, id);
