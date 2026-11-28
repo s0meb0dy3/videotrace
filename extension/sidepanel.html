@@ -16,7 +16,13 @@
   <main>
     <section id="summary" class="view"></section>
     <section id="transcript" class="view" hidden></section>
-    <section id="agent" class="view" hidden></section>
+    <section id="agent" class="view" hidden>
+      <div id="messages"></div>
+      <div class="composer">
+        <input id="input" placeholder="输入消息…" />
+        <button id="send">发送</button>
+      </div>
+    </section>
   </main>
 
   <script type="module" src="sidepanel.js"></script>

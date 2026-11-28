@@ -33,11 +33,17 @@ const server = createServer(async (req, res) => {
           break;
         }
         case "tool_execution_start":
-          send(res, { type: "tool", toolName: event.toolName, args: event.args });
+          send(res, { type: "tool", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
           break;
-        case "tool_execution_end":
-          send(res, { type: "tool_end", toolName: event.toolName, isError: event.isError });
+        case "tool_execution_end": {
+          // 抽出工具结果的文字部分，给前端展开显示
+          const result = (event.result?.content ?? [])
+            .filter((block: any) => block.type === "text")
+            .map((block: any) => block.text)
+            .join("");
+          send(res, { type: "tool_end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError, durationMs: event.durationMs, result });
           break;
+        }
       }
     });
 

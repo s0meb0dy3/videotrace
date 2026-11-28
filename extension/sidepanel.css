@@ -33,3 +33,91 @@ body {
 .view {
   padding: 12px;
 }
+
+/* 1. 整体占满高度：内容区可滚动，输入条固定底部 */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; }
+
+main { flex: 1; min-height: 0; display: flex; }
+.view { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.view[hidden] { display: none; }   /* 让隐藏的页签真的不显示 */
+
+/* 2. Agent 页：上下结构 */
+#agent { display: flex; flex-direction: column; padding: 0; }
+#messages {
+  flex: 1;               /* 占满剩余空间 */
+  overflow-y: auto;      /* 消息多了可滚动 */
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+/* 3. 底部输入条 */
+.composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #e5e5e5; }
+.composer input { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; }
+.composer button { padding: 8px 16px; border: none; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
+
+/* 4. 消息气泡 */
+.msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;   /* 保留回答里的换行 */
+  word-break: break-word;
+}
+.me   { align-self: flex-end;   background: #111;   color: #fff; }   /* 我：右、深色 */
+.bot  { align-self: flex-start; background: #f1f1f1; color: #222; }  /* 回答：左、浅灰 */
+
+/* 5. 可折叠块（思考 / 工具） */
+details.msg {
+  align-self: flex-start;
+  max-width: 92%;
+  padding: 0;
+  background: transparent;
+}
+details.msg > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #888;
+  padding: 2px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  list-style: none;
+}
+details.msg > summary::-webkit-details-marker { display: none; }
+details.msg > summary::before { content: "▸ "; }
+details.msg[open] > summary::before { content: "▾ "; }
+
+/* 思考块 */
+.think { border-left: 2px solid #e5e5e5; padding-left: 6px; }
+.think-body {
+  font-size: 12px;
+  color: #999;
+  font-style: italic;
+  white-space: pre-wrap;
+  padding: 4px 4px 4px 14px;
+}
+
+/* 工具块 */
+.tool { border-left: 2px solid #d8e0ff; padding-left: 6px; }
+.tool-body { font-size: 12px; color: #555; padding: 4px 4px 4px 14px; }
+.tool-args { color: #888; margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
+.tool-result { white-space: pre-wrap; word-break: break-word; }
+
+/* 6. 错误提示 */
+.error { align-self: flex-start; font-size: 12px; color: #c00; background: #fff0f0; }
+
+/* 7. 发送中：按钮变成转圈 */
+#send { min-width: 64px; }
+#send.loading { font-size: 0; }                 /* 把“发送”文字藏起来 */
+#send.loading::after {
+  content: "";
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
