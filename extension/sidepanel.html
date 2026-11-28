@@ -3,10 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>B站逐字稿</title>
+  <title>VideoTrace</title>
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
-  <script type="module" src="app.js"></script>
+  <nav class="tabs">
+    <button class="tab active" data-view="summary">总结</button>
+    <button class="tab" data-view="transcript">转写</button>
+    <button class="tab" data-view="agent">Agent</button>
+  </nav>
+
+  <main>
+    <section id="summary" class="view"></section>
+    <section id="transcript" class="view" hidden></section>
+    <section id="agent" class="view" hidden></section>
+  </main>
+
+  <script type="module" src="sidepanel.js"></script>
 </body>
 </html>
